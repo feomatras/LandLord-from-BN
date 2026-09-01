@@ -97,7 +97,7 @@ async function getCurrentTariff(flatId, date = new Date()) {
   return queryOne(
     `SELECT * FROM tariff_history
      WHERE flat_id = ? AND effective_from <= ?
-     ORDER BY effective_from DESC LIMIT 1`,
+     ORDER BY effective_from DESC, id DESC LIMIT 1`,
     [flatId, isoDate]
   );
 }
@@ -108,7 +108,7 @@ async function getTariffForMonth(flatId, monthKeyStr) {
   return queryOne(
     `SELECT * FROM tariff_history
      WHERE flat_id = ? AND effective_from <= ?
-     ORDER BY effective_from DESC LIMIT 1`,
+     ORDER BY effective_from DESC, id DESC LIMIT 1`,
     [flatId, isoDate]
   );
 }
