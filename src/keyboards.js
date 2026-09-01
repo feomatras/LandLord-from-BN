@@ -1,6 +1,5 @@
 // Telegram keyboard builders
-const { Telegraf } = require('telegraf');
-const { Markup } = Telegraf;
+const { Markup } = require('telegraf');
 
 function adminMainMenu(flatName, flatId) {
   return Markup.keyboard([
