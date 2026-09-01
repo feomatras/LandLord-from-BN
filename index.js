@@ -36,12 +36,20 @@ bot.start(async (ctx) => {
   if (!user) {
     // Check if this is the first-run super-admin setup
     const state = await queries.initBotState(config.SETUP_KEY);
-    if (!state.setup_complete && payload === state.setup_key) {
-      await queries.createUser(userId, 'super_admin');
-      await queries.setSuperAdmin(userId);
+    if (!state.setup_complete) {
+      // First-time setup: prompt for the setup key
+      if (payload === state.setup_key) {
+        await queries.createUser(userId, 'super_admin');
+        await queries.setSuperAdmin(userId);
+        return ctx.reply(
+          '✅ Вы назначены суперадминистратором! Используйте /help для списка команд.',
+          keyboards.adminMainMenu()
+        );
+      }
+      session.setSession(userId, { flow: 'setup_key' });
       return ctx.reply(
-        '✅ Вы назначены суперадминистратором! Используйте /help для списка команд.',
-        keyboards.adminMainMenu()
+        '🔧 Бот не настроен. Вы первый пользователь.\nВведите ключ настройки для получения прав суперадминистратора:',
+        keyboards.removeKeyboard()
       );
     }
     return ctx.reply('По всем вопросам обращаться @Cheatgtp');
@@ -345,8 +353,27 @@ const tariffButtons = {
 
 bot.on('text', async (ctx) => {
   const text = ctx.message.text.trim();
+  const userId = ctx.from.id;
   const user = await getCtxUser(ctx);
-  if (!user) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
+
+  // Handle first-run setup key flow (user is not yet registered)
+  if (!user) {
+    const sess = session.getSession(userId);
+    if (sess && sess.flow === 'setup_key') {
+      const state = await queries.getBotState();
+      if (text === state.setup_key) {
+        await queries.createUser(userId, 'super_admin');
+        await queries.setSuperAdmin(userId);
+        session.clearSession(userId);
+        return ctx.reply(
+          '✅ Вы назначены суперадминистратором! Используйте /help для списка команд.',
+          keyboards.adminMainMenu()
+        );
+      }
+      return ctx.reply('❌ Неверный ключ. Введите ключ настройки:');
+    }
+    return ctx.reply('По всем вопросам обращаться @Cheatgtp');
+  }
 
   // Check active session first
   const sess = session.getSession(user.user_id);
