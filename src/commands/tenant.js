@@ -293,8 +293,10 @@ async function finalizeReadings(ctx, user, bot) {
 }
 async function tenantStats(ctx, user) {
   const flatId = user.flat_id;
-  if (!flatId) return ctx.reply('Квартира не найдена. Обратитесь к арендодателю.');
-
+  if (!flatId) return ctx.reply('Квартира не найдена...');
+  const flat = await queries.getFlat(flatId);
+  if (!flat) return ctx.reply('Квартира не найдена. Обратитесь к арендодателю.');
+  
   const flat = await queries.getFlat(flatId);
   const tariff = await queries.getCurrentTariff(flatId);
   const readings = await queries.getLatestReadings(flatId);
