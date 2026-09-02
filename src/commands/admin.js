@@ -1,18 +1,15 @@
 // Admin (landlord) command handlers
 const queries = require('../queries');
-const { Markup } = require('telegraf');
 const {
   formatMoney,
   formatMoneyShort,
   monthKey,
   isValidDateStr,
   isCurrentOrFutureMonth,
-  isValidPositiveNumber,
   normalizeNumber,
   round2,
   formatDate,
 } = require('../utils');
-const { calculateAccrual, buildAccrualDescription } = require('../billing');
 const keyboards = require('../keyboards');
 const session = require('../session');
 const config = require('../config');
@@ -42,6 +39,7 @@ async function adminStart(ctx, user) {
     msg += `/deleteflat <номер> — удалить квартиру\n`;
     msg += `/history — история транзакций\n`;
     msg += `/stats — тарифы и показания\n`;
+    msg += `/summary — сводка по квартирам\n`;
     msg += `/invite_tenant — пригласить арендатора\n`;
     msg += `/listusers — список пользователей\n`;
     msg += `/removeuser <ID> — удалить пользователя\n`;
@@ -74,6 +72,7 @@ async function adminHelp(ctx) {
 📊 Показания и расчёты:
 • /set_initial_readings <эл> <вода> <газ> — начальные показания
 • /stats — текущие тарифы и последние показания
+• /summary — сводка по квартирам
 • /history — история начислений и платежей
 
 👥 Арендаторы:
@@ -358,6 +357,11 @@ async function handlePaymentInput(ctx, user) {
     session.clearSession(user.user_id);
     return ctx.reply('Некорректная сумма. Попробуйте снова: /pay', keyboards.adminMainMenu());
   }
+  const flat = await queries.getFlat(sess.flatId);
+  if (!flat || flat.admin_user_id !== user.user_id) {
+    session.clearSession(user.user_id);
+    return ctx.reply('Квартира не найдена или не принадлежит вам. Попробуйте снова: /pay', keyboards.adminMainMenu());
+  }
   const mk = monthKey();
   await queries.createPayment(sess.flatId, mk, amount, user.user_id);
   const balance = await queries.getBalance(sess.flatId);
@@ -512,6 +516,29 @@ async function handleTariffDate(ctx, user) {
   await ctx.reply(`✅ Тариф обновлён с ${formatDate(dateStr)}.`, keyboards.adminMainMenu());
 }
 
+async function summary(ctx, user) {
+  const flats = await queries.listFlatsForAdmin(user.user_id);
+  if (!flats.length) return ctx.reply('У вас нет квартир.');
+
+  let totalDebt = 0;
+  let totalOverpay = 0;
+  let msg = `📊 Сводка по вашим квартирам:
+
+`;
+  for (const f of flats) {
+    const balance = await queries.getBalance(f.id);
+    if (balance > 0) totalDebt += balance;
+    else totalOverpay += Math.abs(balance);
+    const balStr = balance > 0 ? `долг ${formatMoneyShort(balance)}` : balance < 0 ? `переплата ${formatMoneyShort(Math.abs(balance))}` : `0`;
+    const tenants = await queries.getTenantsForFlat(f.id);
+    msg += `${f.id}. ${f.name} — ${balStr} (арендаторов: ${tenants.length})\n`;
+  }
+  msg += `\nОбщий долг: ${formatMoney(totalDebt)}\n`;
+  msg += `Общая переплата: ${formatMoney(totalOverpay)}\n`;
+  msg += `Всего квартир: ${flats.length}`;
+  await ctx.reply(msg);
+}
+
 module.exports = {
   adminStart,
   adminHelp,
@@ -521,6 +548,7 @@ module.exports = {
   deleteFlatCmd,
   history,
   stats,
+  summary,
   inviteTenant,
   removeUser,
   listUsers,

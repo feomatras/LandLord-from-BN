@@ -6,7 +6,7 @@ const queries = require('./src/queries');
 const auth = require('./src/auth');
 const keyboards = require('./src/keyboards');
 const session = require('./src/session');
-const { isValidDateStr, formatDate, monthKey } = require('./src/utils');
+const { formatMoney } = require('./src/utils');
 
 const adminCmd = require('./src/commands/admin');
 const tenantCmd = require('./src/commands/tenant');
@@ -16,6 +16,11 @@ const { initSchema } = require('./src/schema');
 
 if (!config.BOT_TOKEN) {
   console.error('BOT_TOKEN is required. Set it in .env');
+  process.exit(1);
+}
+
+if (!config.SETUP_KEY) {
+  console.error('SETUP_KEY is required. Set it in .env');
   process.exit(1);
 }
 
@@ -133,9 +138,9 @@ async function getCtxUser(ctx) {
   return await queries.getUser(ctx.from.id);
 }
 
-function isExpiredForAdmin(user) {
+async function isExpiredForAdmin(user) {
   if (user.role !== 'admin') return false;
-  return !auth.checkSubscriptionActive(user.user_id);
+  return !(await auth.checkSubscriptionActive(user.user_id));
 }
 
 // ---- Admin commands ----
@@ -143,7 +148,7 @@ bot.command('addflat', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
   if (user.role === 'super_admin') return superCmd.addFlat(ctx, user);
-  if (isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+  if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
   await adminCmd.addFlat(ctx, user);
 });
 
@@ -151,7 +156,7 @@ bot.command('select_flat', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
   if (user.role === 'super_admin') return superCmd.selectFlat(ctx, user);
-  if (isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+  if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
   await adminCmd.selectFlat(ctx, user);
 });
 
@@ -159,7 +164,7 @@ bot.command('flats', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
   if (user.role === 'super_admin') return superCmd.listFlats(ctx, user);
-  if (isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+  if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
   await adminCmd.listFlats(ctx, user);
 });
 
@@ -167,7 +172,7 @@ bot.command('deleteflat', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
   if (user.role === 'super_admin') return superCmd.deleteFlatCmd(ctx, user);
-  if (isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+  if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
   await adminCmd.deleteFlatCmd(ctx, user);
 });
 
@@ -175,16 +180,16 @@ bot.command('history', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
   if (user.role === 'super_admin') return superCmd.history(ctx, user);
-  if (isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+  if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
   await adminCmd.history(ctx, user);
 });
 
 bot.command('stats', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
-  if (user.role === 'super_admin') return superCmd.stats(ctx, user);
+  if (user.role === 'super_admin') return superCmd.superAdminStats(ctx, user);
   if (user.role === 'admin') {
-    if (isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+    if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
     return adminCmd.stats(ctx, user);
   }
   return ctx.reply('По всем вопросам обращаться @Cheatgtp');
@@ -194,21 +199,21 @@ bot.command('invite_tenant', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
   if (user.role === 'super_admin') return superCmd.inviteTenant(ctx, user);
-  if (isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+  if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
   await adminCmd.inviteTenant(ctx, user);
 });
 
 bot.command('removeuser', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
-  if (user.role === 'admin' && isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+  if (user.role === 'admin' && await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
   await adminCmd.removeUser(ctx, user);
 });
 
 bot.command('listusers', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
-  if (user.role === 'admin' && isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+  if (user.role === 'admin' && await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
   await adminCmd.listUsers(ctx, user);
 });
 
@@ -222,7 +227,7 @@ bot.command('toggle_rent', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
   if (user.role === 'super_admin') return superCmd.toggleRent(ctx, user);
-  if (isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+  if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
   await adminCmd.toggleRent(ctx, user);
 });
 
@@ -230,7 +235,7 @@ bot.command('set_rent', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
   if (user.role === 'super_admin') return superCmd.setRent(ctx, user);
-  if (isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+  if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
   await adminCmd.setRent(ctx, user);
 });
 
@@ -238,7 +243,7 @@ bot.command('pay', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
   if (user.role === 'super_admin') return superCmd.pay(ctx, user);
-  if (isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+  if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
   await adminCmd.pay(ctx, user);
 });
 
@@ -246,8 +251,16 @@ bot.command('set_initial_readings', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
   if (user.role === 'super_admin') return superCmd.setInitialReadings(ctx, user);
-  if (isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+  if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
   await adminCmd.setInitialReadings(ctx, user);
+});
+
+bot.command('summary', async (ctx) => {
+  const user = await getCtxUser(ctx);
+  if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
+  if (user.role === 'super_admin') return superCmd.summary(ctx, user);
+  if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
+  await adminCmd.summary(ctx, user);
 });
 
 bot.command('contact_superadmin', async (ctx) => {
@@ -268,7 +281,7 @@ bot.command('submit', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || user.role !== 'tenant') return ctx.reply('По всем вопросам обращаться @Cheatgtp');
   if (!auth.isTenantAccessValid(user)) return ctx.reply('Ваш доступ истёк. По всем вопросам обращаться @Cheatgtp');
-  await tenantCmd.submitReadings(ctx, user);
+  await tenantCmd.submitReadings(ctx, user, bot);
 });
 
 // ---- Super admin commands ----
@@ -425,7 +438,7 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  if (user.role === 'admin' && !isExpiredForAdmin(user)) {
+  if (user.role === 'admin' && !(await isExpiredForAdmin(user))) {
     if (text === 'Настройка аренды') {
       const flat = await queries.getFlat(user.selected_flat_id);
       if (!flat) return ctx.reply('Выберите квартиру.');

@@ -1,6 +1,5 @@
 // Tenant command handlers
 const queries = require('../queries');
-const { Markup } = require('telegraf');
 const { formatMoney, formatMoneyShort, monthKey, isValidPositiveNumber, normalizeNumber, formatDate } = require('../utils');
 const { calculateAccrual, buildAccrualDescription } = require('../billing');
 const keyboards = require('../keyboards');
@@ -58,7 +57,7 @@ async function tenantBalance(ctx, user) {
 }
 
 // Start meter reading submission flow
-async function submitReadings(ctx, user) {
+async function submitReadings(ctx, user, bot) {
   const flat = await queries.getFlat(user.flat_id);
   if (!flat) return ctx.reply('Квартира не найдена.');
 
@@ -70,8 +69,8 @@ async function submitReadings(ctx, user) {
   if (existing) {
     // Check if month is still current
     const now = new Date();
-    const readingDate = new Date(`01.${mk}`);
-    if (now.getMonth() !== readingDate.getMonth() || now.getFullYear() !== readingDate.getFullYear()) {
+    const [m, y] = mk.split('.').map(Number);
+    if (now.getMonth() !== m - 1 || now.getFullYear() !== y) {
       return ctx.reply('Срок сдачи показаний за этот месяц истёк. Обратитесь к арендодателю.');
     }
   }
@@ -101,7 +100,7 @@ async function submitReadings(ctx, user) {
     mk,
   });
 
-  await askForReading(ctx, user);
+  await askForReading(ctx, user, bot);
 }
 
 async function getPreviousReadings(flatId, currentMonthKey) {
@@ -129,10 +128,10 @@ async function getPreviousReadings(flatId, currentMonthKey) {
   return { electricity: 0, water: 0, gas: 0 };
 }
 
-async function askForReading(ctx, user) {
+async function askForReading(ctx, user, bot) {
   const sess = session.getSession(user.user_id);
   if (sess.currentIndex >= sess.meters.length) {
-    await finalizeReadings(ctx, user);
+    await finalizeReadings(ctx, user, bot);
     return;
   }
 
@@ -214,14 +213,14 @@ async function confirmReading(ctx, user, bot) {
     pendingReading: null,
   });
   await ctx.answerCbQuery('✅ Показание сохранено');
-  await askForReading(ctx, user);
+  await askForReading(ctx, user, bot);
 }
 
 // Retry reading callback
-async function retryReading(ctx, user) {
+async function retryReading(ctx, user, bot) {
   session.updateSession(user.user_id, { pendingReading: null });
   await ctx.answerCbQuery('Введите заново');
-  await askForReading(ctx, user);
+  await askForReading(ctx, user, bot);
 }
 
 // Finalize: save readings and create accrual

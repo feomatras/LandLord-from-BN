@@ -1,6 +1,5 @@
 // Super-admin command handlers
 const queries = require('../queries');
-const { Markup } = require('telegraf');
 const {
   formatMoney,
   formatMoneyShort,
@@ -10,7 +9,6 @@ const {
   normalizeNumber,
   round2,
   formatDate,
-  generateToken,
 } = require('../utils');
 const keyboards = require('../keyboards');
 const session = require('../session');
@@ -38,6 +36,7 @@ async function superAdminStart(ctx, user) {
   msg += `/deleteflat <номер> — удалить квартиру\n`;
   msg += `/history — история транзакций\n`;
   msg += `/stats — тарифы и показания\n`;
+  msg += `/summary — сводка по квартирам\n`;
   msg += `/invite_tenant — пригласить арендатора\n`;
   msg += `/listusers — список пользователей\n`;
   msg += `/removeuser <ID> — удалить пользователя\n`;
@@ -73,6 +72,7 @@ async function superAdminHelp(ctx) {
 📊 Показания и расчёты:
 • /set_initial_readings <эл> <вода> <газ> — начальные показания
 • /stats — текущие тарифы и показания
+• /summary — сводка по квартирам и общая статистика
 • /history — история начислений и платежей
 
 👥 Арендаторы:
@@ -258,6 +258,34 @@ async function superAdminStats(ctx, user) {
   await ctx.reply(msg);
 }
 
+async function summary(ctx, user) {
+  const flats = await queries.listFlatsForAdmin(user.user_id);
+  let msg = `📊 Сводка по вашим квартирам:\n\n`;
+  if (flats.length === 0) {
+    msg += `У вас нет квартир.\n\n`;
+  } else {
+    let totalDebt = 0;
+    let totalOverpay = 0;
+    for (const f of flats) {
+      const balance = await queries.getBalance(f.id);
+      if (balance > 0) totalDebt += balance;
+      else totalOverpay += Math.abs(balance);
+      const balStr = balance > 0 ? `долг ${formatMoneyShort(balance)}` : balance < 0 ? `переплата ${formatMoneyShort(Math.abs(balance))}` : `0`;
+      const tenants = await queries.getTenantsForFlat(f.id);
+      msg += `${f.id}. ${f.name} — ${balStr} (арендаторов: ${tenants.length})\n`;
+    }
+    msg += `\nОбщий долг: ${formatMoney(totalDebt)}\n`;
+    msg += `Общая переплата: ${formatMoney(totalOverpay)}\n`;
+  }
+  const stats = await queries.getGlobalStats();
+  msg += `\n📊 Общая статистика по системе:\n`;
+  msg += `Арендодателей: ${stats.adminCount}\n`;
+  msg += `Квартир: ${stats.flatCount}\n`;
+  msg += `Активных подписок: ${stats.activeSubs}\n`;
+  msg += `Общая задолженность: ${formatMoney(stats.totalDebt)}`;
+  await ctx.reply(msg);
+}
+
 // ---- Session input handlers ----
 
 async function handleAddAdminInput(ctx, user, bot) {
@@ -333,6 +361,7 @@ module.exports = {
   deleteFlatCmd,
   history,
   stats,
+  summary,
   inviteTenant,
   removeUser,
   listUsers,

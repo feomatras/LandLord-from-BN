@@ -1,7 +1,7 @@
 // Telegram keyboard builders
 const { Markup } = require('telegraf');
 
-function adminMainMenu(flatName, flatId) {
+function adminMainMenu() {
   return Markup.keyboard([
     ['Изменить тариф Воды', 'Изменить тариф Электричества'],
     ['Изменить тариф Газа', 'Изменить тариф ТКО'],
@@ -32,20 +32,6 @@ function flatListKeyboard(flats) {
   return Markup.inlineKeyboard(buttons);
 }
 
-function tariffMenuKeyboard() {
-  return Markup.keyboard([
-    ['Изменить тариф Воды', 'Изменить тариф Электричества'],
-    ['Изменить тариф Газа', 'Изменить тариф ТКО'],
-    ['Изменить тариф УК', 'Изменить Капремонт'],
-    ['Настройка аренды'],
-    ['Главное меню'],
-  ]).resize();
-}
-
-function backToMenuKeyboard() {
-  return Markup.keyboard([['Главное меню']]).resize();
-}
-
 function removeKeyboard() {
   return Markup.removeKeyboard();
 }
@@ -55,7 +41,5 @@ module.exports = {
   confirmKeyboard,
   payKeyboard,
   flatListKeyboard,
-  tariffMenuKeyboard,
-  backToMenuKeyboard,
   removeKeyboard,
 };

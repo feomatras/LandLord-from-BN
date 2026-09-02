@@ -103,7 +103,8 @@ async function getCurrentTariff(flatId, date = new Date()) {
 }
 
 async function getTariffForMonth(flatId, monthKeyStr) {
-  const monthDate = new Date(`01.${monthKeyStr}`);
+  const [m, y] = monthKeyStr.split('.').map(Number);
+  const monthDate = new Date(y, m - 1, 1);
   const isoDate = monthDate.toISOString().split('T')[0];
   return queryOne(
     `SELECT * FROM tariff_history
