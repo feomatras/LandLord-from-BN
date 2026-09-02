@@ -90,4 +90,5 @@ module.exports = {
   generateToken,
   escapeMarkdown,
   formatDate,
+  toFirstDayOfMonth,
 };
