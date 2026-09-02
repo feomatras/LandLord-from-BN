@@ -522,11 +522,6 @@ async function handleTariffDate(ctx, user) {
   await ctx.reply(`✅ Тариф обновлён с ${formatDate(effectiveDate)}.`, keyboards.adminMainMenu());
 }
 
-  await queries.createTariffRecord(sess.flatId, merged, dateStr);
-  session.clearSession(user.user_id);
-  await ctx.reply(`✅ Тариф обновлён с ${formatDate(dateStr)}.`, keyboards.adminMainMenu());
-}
-
 async function summary(ctx, user) {
   const flats = await queries.listFlatsForAdmin(user.user_id);
   if (!flats.length) return ctx.reply('У вас нет квартир.');
