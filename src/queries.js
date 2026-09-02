@@ -147,7 +147,10 @@ async function createTariffRecord(flatId, tariffData, effectiveFrom) {
 }
 
 async function createDefaultTariff(flatId) {
-  return createTariffRecord(flatId, {}, new Date().toISOString().split('T')[0]);
+  const now = new Date();
+  const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
+  const firstDayStr = firstDay.toISOString().split('T')[0];
+  return createTariffRecord(flatId, {}, firstDayStr);
 }
 
 // ---- Meter Readings ----
