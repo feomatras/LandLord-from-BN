@@ -202,7 +202,7 @@ bot.command('history', async (ctx) => {
 bot.command('stats', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
-  if (user.role === 'super_admin') return superCmd.superAdminStats(ctx, user);
+  if (user.role === 'super_admin') return adminCmd.stats(ctx, user);
   if (user.role === 'admin') {
     if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
     return adminCmd.stats(ctx, user);
