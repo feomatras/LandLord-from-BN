@@ -71,7 +71,11 @@ function formatDate(date) {
   const d = new Date(date);
   return d.toLocaleDateString('ru-RU', { year: 'numeric', month: '2-digit', day: '2-digit' });
 }
-
+function toFirstDayOfMonth(dateStr) {
+  const d = new Date(dateStr);
+  const first = new Date(d.getFullYear(), d.getMonth(), 1);
+  return first.toISOString().split('T')[0];
+}
 module.exports = {
   formatMoney,
   formatMoneyShort,
