@@ -9,6 +9,7 @@ const {
   normalizeNumber,
   round2,
   formatDate,
+  toFirstDayOfMonth,
 } = require('../utils');
 const keyboards = require('../keyboards');
 const session = require('../session');
