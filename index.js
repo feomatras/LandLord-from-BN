@@ -86,6 +86,21 @@ async function handleInvite(ctx, tokenStr) {
 
   const existing = await queries.getUser(userId);
   if (existing) {
+    if (existing.role === 'tenant' && !existing.is_active && token.role === 'tenant') {
+      await queries.reactivateTenant(userId, token.flat_id, token.access_until);
+      await queries.markTokenUsed(token.id);
+      await ctx.reply('✅ Вы зарегистрированы как арендатор! Используйте /start для начала работы.');
+      const flat = await queries.getFlat(token.flat_id);
+      if (flat?.admin_user_id) {
+        try {
+          await ctx.telegram.sendMessage(
+            flat.admin_user_id,
+            `🔔 Новый арендатор зарегистрирован: ${userId}\nКвартира: ${flat.name}`
+          );
+        } catch (e) { /* ignore */ }
+      }
+      return;
+    }
     return ctx.reply('Вы уже зарегистрированы в системе. Используйте /start.');
   }
 
