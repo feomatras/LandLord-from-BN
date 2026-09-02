@@ -488,12 +488,17 @@ async function handleTariffInput(ctx, user) {
 // Handle tariff date input
 async function handleTariffDate(ctx, user) {
   const sess = session.getSession(user.user_id);
-  const dateStr = ctx.message.text.trim();
+  let dateStr = ctx.message.text.trim();
 
   if (!isValidDateStr(dateStr)) {
     return ctx.reply('Некорректный формат даты. Используйте ГГГГ-ММ-ДД:');
   }
-  if (!isCurrentOrFutureMonth(dateStr)) {
+
+  // Приводим дату к первому числу месяца
+  const effectiveDate = toFirstDayOfMonth(dateStr);
+
+  // Проверяем, что полученная дата не раньше первого числа текущего месяца (опционально)
+  if (!isCurrentOrFutureMonth(effectiveDate)) {
     return ctx.reply('❌ Дата не может быть раньше первого числа текущего месяца. Введите снова:');
   }
 
@@ -511,6 +516,11 @@ async function handleTariffDate(ctx, user) {
     caprepair: currentTariff?.caprepair || 0,
     ...sess.tariffData,
   };
+
+  await queries.createTariffRecord(sess.flatId, merged, effectiveDate);
+  session.clearSession(user.user_id);
+  await ctx.reply(`✅ Тариф обновлён с ${formatDate(effectiveDate)}.`, keyboards.adminMainMenu());
+}
 
   await queries.createTariffRecord(sess.flatId, merged, dateStr);
   session.clearSession(user.user_id);
