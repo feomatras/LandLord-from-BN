@@ -207,6 +207,10 @@ bot.command('stats', async (ctx) => {
     if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
     return adminCmd.stats(ctx, user);
   }
+   if (user.role === 'tenant') {
+    if (!auth.isTenantAccessValid(user)) return ctx.reply('Ваш доступ истёк. По всем вопросам обращаться @Cheatgtp');
+    return tenantCmd.tenantStats(ctx, user);
+  }
   return ctx.reply('По всем вопросам обращаться @Cheatgtp');
 });
 
