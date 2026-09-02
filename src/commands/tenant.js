@@ -291,11 +291,46 @@ async function finalizeReadings(ctx, user, bot) {
 
   session.clearSession(user.user_id);
 }
+async function tenantStats(ctx, user) {
+  const flatId = user.flat_id;
+  if (!flatId) return ctx.reply('Квартира не найдена. Обратитесь к арендодателю.');
+
+  const flat = await queries.getFlat(flatId);
+  const tariff = await queries.getCurrentTariff(flatId);
+  const readings = await queries.getLatestReadings(flatId);
+  const balance = await queries.getBalance(flatId);
+
+  let msg = `Квартира: ${flat.id}. ${flat.name}\n\n`;
+  msg += `Текущие тарифы:\n`;
+  msg += `  Вода: ${tariff?.water || 0} руб./м³\n`;
+  msg += `  Электричество: т1=${tariff?.electricity_threshold1 || 150} т2=${tariff?.electricity_threshold2 || 800}\n`;
+  msg += `    тариф1=${tariff?.electricity_tariff1 || 0} тариф2=${tariff?.electricity_tariff2 || 0} тариф3=${tariff?.electricity_tariff3 || 0}\n`;
+  msg += `  Газ: ${tariff?.gas || 0} руб./м³\n`;
+  msg += `  ТКО: ${tariff?.tko || 0} руб.\n`;
+  msg += `  УК: ${tariff?.uk || 0} руб.\n`;
+  msg += `  Капремонт: ${tariff?.caprepair || 0} руб.\n`;
+  msg += `  Аренда: ${flat.rent_enabled ? formatMoneyShort(flat.rent_amount) : 'выключена'}\n\n`;
+  if (readings) {
+    msg += `Последние показания (${readings.month}):\n`;
+    msg += `  Электричество: ${readings.electricity || '—'}\n`;
+    msg += `  Вода: ${readings.water || '—'}\n`;
+    msg += `  Газ: ${readings.gas || '—'}\n\n`;
+  }
+  msg += `Текущий баланс: ${formatMoney(balance)}`;
+  await ctx.reply(msg);
+}
 
 module.exports = {
   tenantStart,
   tenantHelp,
   tenantBalance,
+  tenantStats,       
+  submitReadings,
+  handleReadingInput,
+  confirmReading,
+  retryReading,
+  finalizeReadings,
+};
   submitReadings,
   handleReadingInput,
   confirmReading,
