@@ -31,18 +31,14 @@ bot.start(async (ctx) => {
   const userId = ctx.from.id;
   const payload = ctx.startPayload || '';
 
-  // Check if this is an invite link
   if (payload) {
     return handleInvite(ctx, payload);
   }
 
-  // Check if user is registered
   const user = await queries.getUser(userId);
   if (!user) {
-    // Check if this is the first-run super-admin setup
     const state = await queries.initBotState(config.SETUP_KEY);
     if (!state.setup_complete) {
-      // First-time setup: prompt for the setup key
       if (payload === state.setup_key) {
         await queries.createUser(userId, 'super_admin');
         await queries.setSuperAdmin(userId);
@@ -60,7 +56,6 @@ bot.start(async (ctx) => {
     return ctx.reply('По всем вопросам обращаться @Cheatgtp');
   }
 
-  // Route by role
   if (user.role === 'super_admin') return superCmd.superAdminStart(ctx, user);
   if (user.role === 'admin') return adminCmd.adminStart(ctx, user);
   if (user.role === 'tenant') {
@@ -87,7 +82,7 @@ async function handleInvite(ctx, tokenStr) {
   const existing = await queries.getUser(userId);
   if (existing) {
     if (existing.role === 'tenant' && !existing.is_active && token.role === 'tenant') {
-      await queries.reactivateTenant(userId, token.flat_id, token.access_until);
+      await queries.reactivateTenant(userId, token.flat_id);
       await queries.markTokenUsed(token.id);
       await ctx.reply('✅ Вы зарегистрированы как арендатор! Используйте /start для начала работы.');
       const flat = await queries.getFlat(token.flat_id);
@@ -107,25 +102,30 @@ async function handleInvite(ctx, tokenStr) {
   if (token.role === 'admin') {
     await queries.createUser(userId, 'admin');
     await queries.markTokenUsed(token.id);
+    // If subscription params were provided on the token, create subscription
+    if (token.sub_end_date && token.sub_max_flats) {
+      await queries.createSubscription(userId, token.sub_end_date, token.sub_max_flats);
+    }
     await ctx.reply(
       '✅ Вы зарегистрированы как арендодатель! Используйте /start для начала работы.',
       keyboards.adminMainMenu()
     );
-    // Notify super admin
     const state = await queries.getBotState();
     if (state?.super_admin_user_id) {
       try {
-        await ctx.telegram.sendMessage(
-          state.super_admin_user_id,
-          `🔔 Новый арендодатель зарегистрирован: ${userId}\nИспользуйте /manage_subscription для настройки подписки.`
-        );
+        let notifyMsg = `🔔 Новый арендодатель зарегистрирован: ${userId}`;
+        if (token.sub_end_date && token.sub_max_flats) {
+          notifyMsg += `\nПодписка уже настроена: до ${token.sub_end_date}, лимит ${token.sub_max_flats} квартир`;
+        } else {
+          notifyMsg += `\nИспользуйте /manage_subscription для настройки подписки.`;
+        }
+        await ctx.telegram.sendMessage(state.super_admin_user_id, notifyMsg);
       } catch (e) { /* ignore */ }
     }
   } else if (token.role === 'tenant') {
-    await queries.createUser(userId, 'tenant', token.flat_id, token.access_until);
+    await queries.createUser(userId, 'tenant', token.flat_id);
     await queries.markTokenUsed(token.id);
     await ctx.reply('✅ Вы зарегистрированы как арендатор! Используйте /start для начала работы.');
-    // Notify landlord
     const flat = await queries.getFlat(token.flat_id);
     if (flat?.admin_user_id) {
       try {
@@ -147,6 +147,19 @@ bot.help(async (ctx) => {
   if (user.role === 'tenant') return tenantCmd.tenantHelp(ctx);
   return ctx.reply('По всем вопросам обращаться @Cheatgtp');
 });
+
+// ---- /cancel ----
+bot.command('cancel', async (ctx) => {
+  const user = await queries.getUser(ctx.from.id);
+  session.clearSession(ctx.from.id);
+  if (!user) return ctx.reply('Действие отменено.');
+  await ctx.reply('Действие отменено. Возвращаемся в главное меню.', getMainMenu(user));
+});
+
+function getMainMenu(user) {
+  if (user.role === 'tenant') return keyboards.tenantMainMenu();
+  return keyboards.adminMainMenu();
+}
 
 // ---- Middleware: check registration and subscription ----
 async function getCtxUser(ctx) {
@@ -202,15 +215,15 @@ bot.command('history', async (ctx) => {
 bot.command('stats', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
-  if (user.role === 'super_admin') return adminCmd.stats(ctx, user);
+  if (user.role === 'tenant') {
+    if (!auth.isTenantAccessValid(user)) return ctx.reply('Ваш доступ истёк. По всем вопросам обращаться @Cheatgtp');
+    return tenantCmd.tenantStats(ctx, user);
+  }
   if (user.role === 'admin') {
     if (await isExpiredForAdmin(user)) return ctx.reply('Подписка истекла. /contact_superadmin');
     return adminCmd.stats(ctx, user);
   }
-   if (user.role === 'tenant') {
-    if (!auth.isTenantAccessValid(user)) return ctx.reply('Ваш доступ истёк. По всем вопросам обращаться @Cheatgtp');
-    return tenantCmd.tenantStats(ctx, user);
-  }
+  if (user.role === 'super_admin') return adminCmd.stats(ctx, user);
   return ctx.reply('По всем вопросам обращаться @Cheatgtp');
 });
 
@@ -328,6 +341,12 @@ bot.command('manage_subscription', async (ctx) => {
   await superCmd.manageSubscription(ctx, user);
 });
 
+bot.command('globalstats', async (ctx) => {
+  const user = await getCtxUser(ctx);
+  if (!user || user.role !== 'super_admin') return ctx.reply('По всем вопросам обращаться @Cheatgtp');
+  await superCmd.superAdminStats(ctx, user);
+});
+
 bot.command('backup', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || user.role !== 'super_admin') return ctx.reply('По всем вопросам обращаться @Cheatgtp');
@@ -344,7 +363,7 @@ bot.action('confirm_reading', async (ctx) => {
 bot.action('retry_reading', async (ctx) => {
   const user = await getCtxUser(ctx);
   if (!user || user.role !== 'tenant') return ctx.answerCbQuery('Ошибка');
-  await tenantCmd.retryReading(ctx, user);
+  await tenantCmd.retryReading(ctx, user, bot);
 });
 
 bot.action('pay_action', async (ctx) => {
@@ -361,16 +380,28 @@ bot.action(/select_flat_(\d+)/, async (ctx) => {
   const flatId = parseInt(ctx.match[1]);
   const flat = await queries.getFlat(flatId);
   if (!flat || flat.admin_user_id !== user.user_id) return ctx.answerCbQuery('Квартира не найдена');
-  if (user.role === 'super_admin') {
-    await queries.setSelectedFlat(user.user_id, flatId);
-    const balance = await queries.getBalance(flatId);
-    await ctx.answerCbQuery(`Квартира ${flat.name} выбрана`);
-    return ctx.reply(`Активная квартира: ${flat.id}. ${flat.name}\nТекущий баланс: ${formatMoney(balance)}`, keyboards.adminMainMenu());
-  }
   await queries.setSelectedFlat(user.user_id, flatId);
   const balance = await queries.getBalance(flatId);
   await ctx.answerCbQuery(`Квартира ${flat.name} выбрана`);
   await ctx.reply(`Активная квартира: ${flat.id}. ${flat.name}\nТекущий баланс: ${formatMoney(balance)}`, keyboards.adminMainMenu());
+});
+
+// Delete flat confirmation callbacks
+bot.action(/confirm_delete_flat_(\d+)/, async (ctx) => {
+  const user = await getCtxUser(ctx);
+  if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) return ctx.answerCbQuery('Ошибка');
+  const flatId = parseInt(ctx.match[1]);
+  const flat = await queries.getFlat(flatId);
+  if (!flat || flat.admin_user_id !== user.user_id) return ctx.answerCbQuery('Квартира не найдена');
+  await queries.deleteFlat(flatId);
+  await ctx.answerCbQuery('Квартира удалена');
+  await ctx.editMessageText(`✅ Квартира «${flat.name}» удалена вместе со всеми данными.`);
+  await ctx.reply('Возвращаемся в главное меню.', keyboards.adminMainMenu());
+});
+
+bot.action('cancel_delete_flat', async (ctx) => {
+  await ctx.answerCbQuery('Удаление отменено');
+  await ctx.editMessageText('❌ Удаление квартиры отменено.');
 });
 
 // ---- Menu button handlers ----
@@ -410,6 +441,16 @@ bot.on('text', async (ctx) => {
   // Check active session first
   const sess = session.getSession(user.user_id);
   if (sess) {
+    // /cancel is handled by the command, but also check text
+    if (text === '/cancel' || text.toLowerCase() === 'отмена') {
+      session.clearSession(user.user_id);
+      return ctx.reply('Действие отменено. Возвращаемся в главное меню.', getMainMenu(user));
+    }
+
+    if (sess.flow === 'add_flat' && (user.role === 'admin' || user.role === 'super_admin')) {
+      if (user.role === 'super_admin') return superCmd.handleAddFlatInput(ctx, user, bot);
+      return adminCmd.handleAddFlatInput(ctx, user, bot);
+    }
     if (sess.flow === 'payment' && (user.role === 'admin' || user.role === 'super_admin')) {
       if (user.role === 'super_admin') return superCmd.handlePaymentInput(ctx, user);
       return adminCmd.handlePaymentInput(ctx, user);
@@ -419,10 +460,10 @@ bot.on('text', async (ctx) => {
     }
     if (sess.flow === 'tariff_change' && (user.role === 'admin' || user.role === 'super_admin')) {
       if (user.role === 'super_admin') {
-        if (sess.step === 'tariff_date') return superCmd.handleTariffDate(ctx, user);
+        if (sess.step === 'tariff_date') return superCmd.handleTariffDate(ctx, user, bot);
         return superCmd.handleTariffInput(ctx, user);
       }
-      if (sess.step === 'tariff_date') return adminCmd.handleTariffDate(ctx, user);
+      if (sess.step === 'tariff_date') return adminCmd.handleTariffDate(ctx, user, bot);
       return adminCmd.handleTariffInput(ctx, user);
     }
     if (sess.flow === 'meter_readings' && user.role === 'tenant') {
@@ -431,12 +472,24 @@ bot.on('text', async (ctx) => {
     if (sess.flow === 'add_admin' && user.role === 'super_admin') {
       return superCmd.handleAddAdminInput(ctx, user, bot);
     }
+    if (sess.flow === 'invite_admin' && user.role === 'super_admin') {
+      return superCmd.handleInviteAdminInput(ctx, user, bot);
+    }
   }
 
   // Menu buttons
   if (text === 'Главное меню') {
     if (user.role === 'admin') return adminCmd.adminStart(ctx, user);
     if (user.role === 'super_admin') return superCmd.superAdminStart(ctx, user);
+    if (user.role === 'tenant') return tenantCmd.tenantStart(ctx, user);
+  }
+
+  // Tenant menu buttons
+  if (user.role === 'tenant') {
+    if (text === 'Передать показания') return tenantCmd.submitReadings(ctx, user, bot);
+    if (text === 'Баланс') return tenantCmd.tenantBalance(ctx, user);
+    if (text === 'Статистика') return tenantCmd.tenantStats(ctx, user);
+    return;
   }
 
   if (user.role === 'super_admin') {
@@ -474,14 +527,7 @@ bot.on('text', async (ctx) => {
     }
   }
 
-  // If nothing matched and user is admin/super_admin, show menu
   if (user.role === 'admin' || user.role === 'super_admin') {
-    // Ignore unrecognized text in menu mode
-    return;
-  }
-
-  // Tenant unrecognized
-  if (user.role === 'tenant') {
     return;
   }
 

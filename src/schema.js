@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS flats (
   name TEXT NOT NULL,
   rent_enabled INTEGER NOT NULL DEFAULT 0,
   rent_amount NUMERIC NOT NULL DEFAULT 0,
+  balance NUMERIC(10,2) NOT NULL DEFAULT 0,
   admin_user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -17,7 +18,6 @@ CREATE TABLE IF NOT EXISTS users (
   flat_id INTEGER REFERENCES flats(id) ON DELETE SET NULL,
   selected_flat_id INTEGER,
   is_active INTEGER NOT NULL DEFAULT 1,
-  access_until TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS meter_readings (
   previous_electricity NUMERIC,
   previous_water NUMERIC,
   previous_gas NUMERIC,
+  submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -80,7 +81,8 @@ CREATE TABLE IF NOT EXISTS invite_tokens (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   expires_at TEXT,
   used INTEGER NOT NULL DEFAULT 0,
-  access_until TEXT
+  sub_end_date TEXT,
+  sub_max_flats INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS bot_state (
@@ -95,13 +97,72 @@ CREATE INDEX IF NOT EXISTS idx_users_flat ON users(flat_id);
 CREATE INDEX IF NOT EXISTS idx_tariff_flat ON tariff_history(flat_id);
 CREATE INDEX IF NOT EXISTS idx_tariff_effective ON tariff_history(effective_from);
 CREATE INDEX IF NOT EXISTS idx_readings_flat_month ON meter_readings(flat_id, month);
+CREATE INDEX IF NOT EXISTS idx_readings_flat_month_sub ON meter_readings(flat_id, month, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_txn_flat_month ON transactions(flat_id, month);
 CREATE INDEX IF NOT EXISTS idx_sub_admin ON subscriptions(admin_user_id);
 CREATE INDEX IF NOT EXISTS idx_invite_token ON invite_tokens(token);
 `;
 
+const MIGRATION_SQL = `
+-- Add balance column to flats if missing
+ALTER TABLE flats ADD COLUMN balance NUMERIC(10,2) NOT NULL DEFAULT 0;
+
+-- Add submitted_at column to meter_readings if missing
+ALTER TABLE meter_readings ADD COLUMN submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP;
+`;
+
+const TOKEN_MIGRATION_SQL = `
+-- Add subscription param columns to invite_tokens if missing
+ALTER TABLE invite_tokens ADD COLUMN sub_end_date TEXT;
+ALTER TABLE invite_tokens ADD COLUMN sub_max_flats INTEGER;
+`;
+
+function columnExists(tableName, columnName) {
+  const row = db.prepare(`PRAGMA table_info(${tableName})`).get();
+  const cols = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  return cols.some(c => c.name === columnName);
+}
+
+function runMigration() {
+  // Add flats.balance if missing
+  if (!columnExists('flats', 'balance')) {
+    db.exec('ALTER TABLE flats ADD COLUMN balance NUMERIC(10,2) NOT NULL DEFAULT 0;');
+    console.log('[DB] Migrated: added flats.balance');
+  }
+
+  // Add meter_readings.submitted_at if missing
+  if (!columnExists('meter_readings', 'submitted_at')) {
+    db.exec('ALTER TABLE meter_readings ADD COLUMN submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP;');
+    console.log('[DB] Migrated: added meter_readings.submitted_at');
+  }
+
+  // Add invite_tokens subscription params if missing
+  if (!columnExists('invite_tokens', 'sub_end_date')) {
+    db.exec('ALTER TABLE invite_tokens ADD COLUMN sub_end_date TEXT;');
+    console.log('[DB] Migrated: added invite_tokens.sub_end_date');
+  }
+  if (!columnExists('invite_tokens', 'sub_max_flats')) {
+    db.exec('ALTER TABLE invite_tokens ADD COLUMN sub_max_flats INTEGER;');
+    console.log('[DB] Migrated: added invite_tokens.sub_max_flats');
+  }
+
+  // Backfill flats.balance from transactions for existing flats
+  const flats = db.prepare('SELECT id FROM flats').all();
+  for (const flat of flats) {
+    const row = db.prepare(
+      'SELECT COALESCE(SUM(amount), 0) AS balance FROM transactions WHERE flat_id = ?'
+    ).get(flat.id);
+    const bal = row ? Math.round(row.balance * 100) / 100 : 0;
+    db.prepare('UPDATE flats SET balance = ? WHERE id = ?').run(bal, flat.id);
+  }
+  if (flats.length > 0) {
+    console.log(`[DB] Backfilled balance for ${flats.length} flats`);
+  }
+}
+
 async function initSchema() {
   db.exec(SCHEMA_SQL);
+  runMigration();
   console.log('[DB] Schema initialized');
 }
 

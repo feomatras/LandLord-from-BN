@@ -1,13 +1,15 @@
 // Scheduler: cron-based reminders and notifications
 const cron = require('node-cron');
-const queries = require('./queries');
-const { formatMoney, formatMoneyShort, monthKey, prevMonthKey } = require('./utils');
-const keyboards = require('./keyboards');
+const queries = require('../queries');
+const { formatMoney, formatMoneyShort, monthKey, prevMonthKey } = require('../utils');
+const keyboards = require('../keyboards');
+const { calculateFixedOnlyAccrual, buildAccrualDescription } = require('../billing');
 
 function setupScheduler(bot) {
   // 23rd of each month at 10:00 — remind tenants to submit readings
   cron.schedule('0 10 23 * *', async () => {
     await remindTenantsToSubmit(bot);
+    await autoAccrualNoReadings(bot);
   }, { timezone: 'Europe/Moscow' });
 
   // 24th at 10:00 — second reminder
@@ -39,7 +41,6 @@ async function remindTenantsToSubmit(bot) {
   if (!allTenants) return;
 
   for (const tenant of allTenants) {
-    if (tenant.access_until && new Date(tenant.access_until) < new Date()) continue;
     const readings = await queries.getReadings(tenant.flat_id, mk);
     if (!readings) {
       try {
@@ -47,6 +48,57 @@ async function remindTenantsToSubmit(bot) {
           tenant.user_id,
           `📅 Напоминание: пожалуйста, передайте показания счётчиков до 25 числа.\nИспользуйте команду /submit`
         );
+      } catch (e) { /* ignore */ }
+    }
+  }
+}
+
+// Auto-accrual for flats with tenants but no readings (23rd, 10:00)
+async function autoAccrualNoReadings(bot) {
+  const mk = monthKey();
+  const flats = await queries.getFlatsWithTenantsNoReadings(mk);
+  if (!flats || flats.length === 0) return;
+
+  for (const flat of flats) {
+    // Check if accrual already exists
+    const existing = await queries.getAccrualForMonth(flat.id, mk);
+    if (existing) continue;
+
+    // Get tariff active on 1st of month
+    const tariff = await queries.getTariffForMonth(flat.id, mk);
+    if (!tariff) continue;
+
+    const { breakdown, total } = calculateFixedOnlyAccrual(tariff, flat);
+    if (total === 0) continue;
+
+    const description = buildAccrualDescription(breakdown);
+    const tariffsSnapshot = {
+      water: tariff.water,
+      electricity_tariff1: tariff.electricity_tariff1,
+      electricity_tariff2: tariff.electricity_tariff2,
+      electricity_tariff3: tariff.electricity_tariff3,
+      gas: tariff.gas,
+      tko: tariff.tko,
+      uk: tariff.uk,
+      caprepair: tariff.caprepair,
+      rent_enabled: flat.rent_enabled,
+      rent_amount: flat.rent_amount,
+    };
+
+    await queries.createAccrual(flat.id, mk, total, description, tariffsSnapshot, null);
+    console.log(`[Scheduler] Auto-accrual for flat ${flat.id} (${mk}): ${total}`);
+
+    // Notify landlord
+    if (flat.admin_user_id) {
+      try {
+        let msg = `📋 Автоматическое начисление (нет показаний)\n`;
+        msg += `Квартира: ${flat.name} (№${flat.id})\n`;
+        msg += `Месяц: ${mk}\n\n`;
+        msg += `${description}\n\n`;
+        msg += `Итого: ${formatMoney(total)}\n`;
+        const balance = await queries.getBalance(flat.id);
+        msg += `Баланс: ${formatMoney(balance)}`;
+        await bot.telegram.sendMessage(flat.admin_user_id, msg);
       } catch (e) { /* ignore */ }
     }
   }

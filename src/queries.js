@@ -1,17 +1,17 @@
 // Data access layer: all database queries via better-sqlite3
-const { query, queryOne, queryAll } = require('./db');
-const { prevMonthKey, generateToken } = require('./utils');
+const { query, queryOne, queryAll, db } = require('./db');
+const { prevMonthKey, generateToken, parseDateInput } = require('./utils');
 
 // ---- Users ----
 async function getUser(userId) {
   return queryOne('SELECT * FROM users WHERE user_id = ?', [userId]);
 }
 
-async function createUser(userId, role, flatId = null, accessUntil = null) {
+async function createUser(userId, role, flatId = null) {
   return queryOne(
-    `INSERT INTO users (user_id, role, flat_id, access_until, is_active)
-     VALUES (?, ?, ?, ?, 1) RETURNING *`,
-    [userId, role, flatId, accessUntil]
+    `INSERT INTO users (user_id, role, flat_id, is_active)
+     VALUES (?, ?, ?, 1) RETURNING *`,
+    [userId, role, flatId]
   );
 }
 
@@ -19,11 +19,11 @@ async function deactivateUser(userId) {
   await query('UPDATE users SET is_active = 0 WHERE user_id = ?', [userId]);
 }
 
-async function reactivateTenant(userId, flatId, accessUntil) {
+async function reactivateTenant(userId, flatId) {
   return queryOne(
-    `UPDATE users SET role = 'tenant', flat_id = ?, access_until = ?, is_active = 1
+    `UPDATE users SET role = 'tenant', flat_id = ?, is_active = 1
      WHERE user_id = ? RETURNING *`,
-    [flatId, accessUntil, userId]
+    [flatId, userId]
   );
 }
 
@@ -33,7 +33,7 @@ async function setSelectedFlat(userId, flatId) {
 
 async function listUsersForAdmin(adminUserId) {
   return queryAll(
-    `SELECT u.user_id, u.role, u.flat_id, u.is_active, u.access_until
+    `SELECT u.user_id, u.role, u.flat_id, u.is_active
      FROM users u
      JOIN flats f ON u.flat_id = f.id
      WHERE f.admin_user_id = ? AND u.role = 'tenant'
@@ -81,10 +81,10 @@ async function countFlatsForAdmin(adminUserId) {
   return row ? row.count : 0;
 }
 
-async function createFlat(name, adminUserId) {
+async function createFlat(name, adminUserId, initialBalance = 0) {
   return queryOne(
-    'INSERT INTO flats (name, admin_user_id) VALUES (?, ?) RETURNING *',
-    [name, adminUserId]
+    `INSERT INTO flats (name, admin_user_id, balance) VALUES (?, ?, ?) RETURNING *`,
+    [name, adminUserId, initialBalance]
   );
 }
 
@@ -99,9 +99,17 @@ async function setRent(flatId, enabled, amount = 0) {
   );
 }
 
+async function updateFlatBalance(flatId, delta) {
+  await query('UPDATE flats SET balance = balance + ? WHERE id = ?', [delta, flatId]);
+}
+
+async function setFlatBalance(flatId, balance) {
+  await query('UPDATE flats SET balance = ? WHERE id = ?', [balance, flatId]);
+}
+
 // ---- Tariffs ----
 async function getCurrentTariff(flatId, date = new Date()) {
-  const isoDate = date.toISOString().split('T')[0];
+  const isoDate = typeof date === 'string' ? date : date.toISOString().split('T')[0];
   return queryOne(
     `SELECT * FROM tariff_history
      WHERE flat_id = ? AND effective_from <= ?
@@ -120,6 +128,20 @@ async function getTariffForMonth(flatId, monthKeyStr) {
      ORDER BY effective_from DESC, id DESC LIMIT 1`,
     [flatId, isoDate]
   );
+}
+
+// Check if a tariff change exists within the given month
+async function isIntervalMonth(flatId, monthKeyStr) {
+  const [m, y] = monthKeyStr.split('.').map(Number);
+  const firstDay = `${y}-${String(m).padStart(2, '0')}-01`;
+  const lastDayDate = new Date(y, m, 0);
+  const lastDay = `${y}-${String(m).padStart(2, '0')}-${String(lastDayDate.getDate()).padStart(2, '0')}`;
+  const row = await queryOne(
+    `SELECT COUNT(*) AS count FROM tariff_history
+     WHERE flat_id = ? AND effective_from >= ? AND effective_from <= ?`,
+    [flatId, firstDay, lastDay]
+  );
+  return row ? row.count > 0 : false;
 }
 
 async function createTariffRecord(flatId, tariffData, effectiveFrom) {
@@ -155,19 +177,46 @@ async function createDefaultTariff(flatId) {
 
 // ---- Meter Readings ----
 async function getReadings(flatId, mk) {
-  return queryOne('SELECT * FROM meter_readings WHERE flat_id = ? AND month = ?', [flatId, mk]);
+  return queryOne(
+    `SELECT * FROM meter_readings WHERE flat_id = ? AND month = ? ORDER BY submitted_at DESC LIMIT 1`,
+    [flatId, mk]
+  );
 }
 
 async function getLatestReadings(flatId) {
   return queryOne(
-    'SELECT * FROM meter_readings WHERE flat_id = ? ORDER BY month DESC LIMIT 1',
+    `SELECT * FROM meter_readings WHERE flat_id = ? ORDER BY month DESC, submitted_at DESC LIMIT 1`,
     [flatId]
   );
 }
 
-async function upsertReadings(flatId, mk, readings, prevReadings) {
-  const existing = await getReadings(flatId, mk);
+async function getAllReadingsForMonth(flatId, mk) {
+  return queryAll(
+    `SELECT * FROM meter_readings WHERE flat_id = ? AND month = ? ORDER BY submitted_at ASC`,
+    [flatId, mk]
+  );
+}
+
+async function upsertReadings(flatId, mk, readings, prevReadings, isInterval) {
   const nowIso = new Date().toISOString();
+  if (isInterval) {
+    // Interval month: always insert a new row
+    return queryOne(
+      `INSERT INTO meter_readings
+       (flat_id, month, electricity, water, gas, previous_electricity, previous_water, previous_gas, submitted_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING *`,
+      [
+        flatId, mk, readings.electricity, readings.water, readings.gas,
+        prevReadings.electricity, prevReadings.water, prevReadings.gas,
+        nowIso, nowIso,
+      ]
+    );
+  }
+  // Normal month: upsert (one row per month)
+  const existing = await queryOne(
+    'SELECT * FROM meter_readings WHERE flat_id = ? AND month = ? ORDER BY submitted_at DESC LIMIT 1',
+    [flatId, mk]
+  );
   if (existing) {
     return queryOne(
       `UPDATE meter_readings SET
@@ -184,11 +233,12 @@ async function upsertReadings(flatId, mk, readings, prevReadings) {
   }
   return queryOne(
     `INSERT INTO meter_readings
-     (flat_id, month, electricity, water, gas, previous_electricity, previous_water, previous_gas, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?) RETURNING *`,
+     (flat_id, month, electricity, water, gas, previous_electricity, previous_water, previous_gas, submitted_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING *`,
     [
       flatId, mk, readings.electricity, readings.water, readings.gas,
-      prevReadings.electricity, prevReadings.water, prevReadings.gas, nowIso,
+      prevReadings.electricity, prevReadings.water, prevReadings.gas,
+      nowIso, nowIso,
     ]
   );
 }
@@ -209,9 +259,9 @@ async function setInitialReadings(flatId, electricity, water, gas) {
   }
   return queryOne(
     `INSERT INTO meter_readings
-     (flat_id, month, electricity, water, gas, previous_electricity, previous_water, previous_gas, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?) RETURNING *`,
-    [flatId, pmk, electricity, water, gas, electricity, water, gas, nowIso]
+     (flat_id, month, electricity, water, gas, previous_electricity, previous_water, previous_gas, submitted_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING *`,
+    [flatId, pmk, electricity, water, gas, electricity, water, gas, nowIso, nowIso]
   );
 }
 
@@ -237,14 +287,21 @@ async function getAccrualForMonth(flatId, mk) {
 }
 
 async function createAccrual(flatId, mk, amount, description, tariffsSnapshot, createdBy) {
-  return queryOne(
+  const txn = queryOne(
     `INSERT INTO transactions (flat_id, month, amount, type, description, tariffs_snapshot, created_by)
      VALUES (?, ?, ?, 'accrual', ?, ?, ?) RETURNING *`,
     [flatId, mk, amount, description, JSON.stringify(tariffsSnapshot), createdBy]
   );
+  await updateFlatBalance(flatId, amount);
+  return txn;
 }
 
 async function deleteAccrual(flatId, mk) {
+  // Get the old amount so we can reverse the balance
+  const old = await getAccrualForMonth(flatId, mk);
+  if (old) {
+    await updateFlatBalance(flatId, -old.amount);
+  }
   await query(
     `DELETE FROM transactions WHERE flat_id = ? AND month = ? AND type = 'accrual'`,
     [flatId, mk]
@@ -253,19 +310,28 @@ async function deleteAccrual(flatId, mk) {
 
 async function createPayment(flatId, mk, amount, createdBy) {
   const payAmount = -Math.abs(Number(amount));
-  return queryOne(
+  const txn = queryOne(
     `INSERT INTO transactions (flat_id, month, amount, type, description, created_by)
      VALUES (?, ?, ?, 'payment', 'Платёж от арендатора', ?) RETURNING *`,
     [flatId, mk, payAmount, createdBy]
   );
+  await updateFlatBalance(flatId, payAmount);
+  return txn;
+}
+
+async function createInitialBalanceTransaction(flatId, amount, createdBy) {
+  const txn = queryOne(
+    `INSERT INTO transactions (flat_id, month, amount, type, description, created_by)
+     VALUES (?, ?, ?, 'initial', 'Начальный баланс', ?) RETURNING *`,
+    [flatId, monthKey(), amount, createdBy]
+  );
+  await updateFlatBalance(flatId, amount);
+  return txn;
 }
 
 async function getBalance(flatId) {
-  const row = await queryOne(
-    'SELECT COALESCE(SUM(amount), 0) AS balance FROM transactions WHERE flat_id = ?',
-    [flatId]
-  );
-  return row ? Math.round(row.balance * 100) / 100 : 0;
+  const flat = await queryOne('SELECT balance FROM flats WHERE id = ?', [flatId]);
+  return flat ? Math.round(flat.balance * 100) / 100 : 0;
 }
 
 // ---- Subscriptions ----
@@ -307,14 +373,14 @@ function isSubscriptionActive(sub) {
 }
 
 // ---- Invite Tokens ----
-async function createInviteToken(role, flatId = null, accessUntil = null) {
+async function createInviteToken(role, flatId = null, subEndDate = null, subMaxFlats = null) {
   const token = generateToken();
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
   return queryOne(
-    `INSERT INTO invite_tokens (token, role, flat_id, expires_at, access_until)
-     VALUES (?, ?, ?, ?, ?) RETURNING *`,
-    [token, role, flatId, expiresAt.toISOString(), accessUntil]
+    `INSERT INTO invite_tokens (token, role, flat_id, expires_at, sub_end_date, sub_max_flats)
+     VALUES (?, ?, ?, ?, ?, ?) RETURNING *`,
+    [token, role, flatId, expiresAt.toISOString(), subEndDate, subMaxFlats]
   );
 }
 
@@ -336,13 +402,23 @@ async function getTenantsForFlat(flatId) {
 
 async function getAllActiveTenants() {
   return queryAll(
-    `SELECT user_id, flat_id, access_until, is_active, role FROM users
+    `SELECT user_id, flat_id, is_active, role FROM users
      WHERE role = 'tenant' AND is_active = 1`
   );
 }
 
 async function getAllFlats() {
   return queryAll('SELECT * FROM flats');
+}
+
+// Get flats that have at least one active tenant but no readings for the current month
+async function getFlatsWithTenantsNoReadings(mk) {
+  return queryAll(
+    `SELECT f.* FROM flats f
+     WHERE EXISTS (SELECT 1 FROM users u WHERE u.flat_id = f.id AND u.role = 'tenant' AND u.is_active = 1)
+     AND NOT EXISTS (SELECT 1 FROM meter_readings mr WHERE mr.flat_id = f.id AND mr.month = ?)`,
+    [mk]
+  );
 }
 
 // ---- Stats ----
@@ -355,7 +431,7 @@ async function getGlobalStats() {
     [today]
   );
   const debtRow = await queryOne(
-    `SELECT COALESCE(SUM(amount), 0) AS total FROM transactions WHERE type = 'accrual'`
+    `SELECT COALESCE(SUM(balance), 0) AS total FROM flats`
   );
   return {
     adminCount: adminRow ? adminRow.count : 0,
@@ -392,12 +468,16 @@ module.exports = {
   createFlat,
   deleteFlat,
   setRent,
+  updateFlatBalance,
+  setFlatBalance,
   getCurrentTariff,
   getTariffForMonth,
+  isIntervalMonth,
   createTariffRecord,
   createDefaultTariff,
   getReadings,
   getLatestReadings,
+  getAllReadingsForMonth,
   upsertReadings,
   setInitialReadings,
   getTransactions,
@@ -406,6 +486,7 @@ module.exports = {
   createAccrual,
   deleteAccrual,
   createPayment,
+  createInitialBalanceTransaction,
   getBalance,
   getSubscription,
   createSubscription,
@@ -418,6 +499,7 @@ module.exports = {
   getTenantsForFlat,
   getAllActiveTenants,
   getAllFlats,
+  getFlatsWithTenantsNoReadings,
   getGlobalStats,
   deleteUserAndData,
 };

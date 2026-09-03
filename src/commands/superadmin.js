@@ -4,8 +4,10 @@ const {
   formatMoney,
   formatMoneyShort,
   monthKey,
+  parseDateInput,
   isValidDateStr,
   isCurrentOrFutureMonth,
+  parseNumber,
   normalizeNumber,
   round2,
   formatDate,
@@ -31,7 +33,7 @@ async function superAdminStart(ctx, user) {
   msg += `Активная квартира: ${selectedFlat ? `${selectedFlat.id}. ${selectedFlat.name}` : 'не выбрана'}\n`;
   msg += `Всего квартир: ${flats.length}\n\n`;
   msg += `Управление квартирами (без ограничений):\n`;
-  msg += `/addflat <название> — создать квартиру\n`;
+  msg += `/addflat — создать квартиру\n`;
   msg += `/select_flat <номер> — выбрать квартиру\n`;
   msg += `/flats — список квартир\n`;
   msg += `/deleteflat <номер> — удалить квартиру\n`;
@@ -49,9 +51,10 @@ async function superAdminStart(ctx, user) {
   msg += `/add_admin — добавить арендодателя вручную\n`;
   msg += `/invite_admin — ссылка-приглашение для арендодателя\n`;
   msg += `/list_admins — список арендодателей\n`;
-  msg += `/manage_subscription <user_id> <end_date> <max_flats> — управление подпиской\n\n`;
-  msg += `/stats — общая статистика\n`;
+  msg += `/manage_subscription <user_id> <ДД.ММ.ГГГГ> <max_flats> — управление подпиской\n\n`;
+  msg += `/globalstats — общая статистика\n`;
   msg += `/backup — резервная копия БД\n`;
+  msg += `/cancel — отменить текущее действие\n`;
   msg += `/help — подробная инструкция`;
   await ctx.reply(msg, keyboards.adminMainMenu());
 }
@@ -60,13 +63,13 @@ async function superAdminHelp(ctx) {
   let msg = `📋 Инструкция для суперадминистратора
 
 🏠 Квартиры (без ограничений подписки):
-• /addflat <название> — создать квартиру
+• /addflat — создать квартиру (диалог: название, баланс, тарифы)
 • /select_flat <номер> — выбрать активную квартиру
 • /flats — список квартир с балансами
-• /deleteflat <номер> — удалить квартиру (без проверки сальдо)
+• /deleteflat <номер> — удалить квартиру (с подтверждением)
 
 ⚙️ Тарифы (через кнопки меню):
-• Изменение тарифа требует дату начала действия (ГГГГ-ММ-ДД)
+• Изменение тарифа требует дату начала действия (ДД.ММ.ГГГГ)
 • Если тариф = 0, показания не запрашиваются
 • Электричество: 5 чисел (порог1 тариф1 порог2 тариф2 тариф3) или одно число
 
@@ -88,26 +91,26 @@ async function superAdminHelp(ctx) {
 
 🏢 Арендодатели:
 • /add_admin — добавить вручную
-• /invite_admin — ссылка-приглашение
+• /invite_admin — ссылка-приглашение (можно сразу указать параметры подписки)
 • /list_admins — список с подписками
-• /manage_subscription <user_id> <ГГГГ-ММ-ДД> <max_flats> — управление
+• /manage_subscription <user_id> <ДД.ММ.ГГГГ> <max_flats> — управление
 
-📊 /stats — общая статистика
-💾 /backup — резервная копия`;
+📊 /globalstats — общая статистика
+💾 /backup — резервная копия
+❌ /cancel — отменить любое незавершённое действие`;
   await ctx.reply(msg);
 }
 
 // ---- Flat management (unrestricted) ----
 
 async function addFlat(ctx, user) {
-  const name = ctx.message.text.replace(/^\/addflat\s*/i, '').trim();
-  if (!name) {
-    return ctx.reply('Укажите название квартиры: /addflat <название>');
-  }
-  const flat = await queries.createFlat(name, user.user_id);
-  await queries.createDefaultTariff(flat.id);
-  await queries.setSelectedFlat(user.user_id, flat.id);
-  await ctx.reply(`✅ Квартира «${name}» создана (№${flat.id}). Она выбрана как активная.`, keyboards.adminMainMenu());
+  // Super admin: no subscription check, use same multi-step dialog
+  return adminCmd.addFlat(ctx, user);
+}
+
+// Handle add_flat dialog (delegate to admin)
+async function handleAddFlatInput(ctx, user, bot) {
+  return adminCmd.handleAddFlatInput(ctx, user, bot);
 }
 
 async function selectFlat(ctx, user) {
@@ -149,11 +152,12 @@ async function deleteFlatCmd(ctx, user) {
     return ctx.reply('Квартира не найдена.');
   }
   const balance = await queries.getBalance(flatId);
+  let msg = `⚠️ Вы собираетесь удалить квартиру «${flat.name}» (№${flat.id}).\n`;
   if (Math.abs(balance) > 0.001) {
-    await ctx.reply(`⚠️ Внимание: сальдо по квартире не равно нулю (${formatMoney(balance)}). Удаление всё равно будет выполнено.`);
+    msg += `Внимание: сальдо не равно нулю (${formatMoney(balance)}). Все данные будут потеряны!\n`;
   }
-  await queries.deleteFlat(flatId);
-  await ctx.reply(`✅ Квартира «${flat.name}» удалена вместе со всеми данными.`, keyboards.adminMainMenu());
+  msg += `\nВсе связанные данные будут удалены.\n\nПодтвердите удаление:`;
+  await ctx.reply(msg, keyboards.deleteConfirmKeyboard(flatId));
 }
 
 async function history(ctx, user) {
@@ -199,12 +203,52 @@ async function addAdmin(ctx, user) {
   await ctx.reply('Введите Telegram ID нового арендодателя:', keyboards.removeKeyboard());
 }
 
+// /invite_admin — multi-step: optional end date and max flats
 async function inviteAdmin(ctx, user) {
-  const token = await queries.createInviteToken('admin');
-  const link = `https://t.me/${config.BOT_USERNAME}?start=${token.token}`;
+  session.setSession(user.user_id, { flow: 'invite_admin', step: 'end_date' });
   await ctx.reply(
-    `🔗 Ссылка-приглашение для арендодателя:\n${link}\n\nСрок действия: 7 дней.\nПосле регистрации используйте /manage_subscription для настройки подписки.`
+    'Создание приглашения для арендодателя.\n' +
+    'Введите дату окончания подписки (ДД.ММ.ГГГГ) или «пропустить»:',
+    keyboards.removeKeyboard()
   );
+}
+
+async function handleInviteAdminInput(ctx, user, bot) {
+  const sess = session.getSession(user.user_id);
+  const text = ctx.message.text.trim();
+
+  if (sess.step === 'end_date') {
+    let endDate = null;
+    if (text.toLowerCase() !== 'пропустить') {
+      const iso = parseDateInput(text);
+      if (!iso) return ctx.reply('Некорректный формат даты. Используйте ДД.ММ.ГГГГ или «пропустить»:');
+      endDate = iso;
+    }
+    session.updateSession(user.user_id, { step: 'max_flats', subEndDate: endDate });
+    return ctx.reply('Введите максимальное количество квартир (или «пропустить»):');
+  }
+
+  if (sess.step === 'max_flats') {
+    let maxFlats = null;
+    if (text.toLowerCase() !== 'пропустить') {
+      const n = parseInt(text);
+      if (isNaN(n) || n < 1) return ctx.reply('Введите целое число больше 0 или «пропустить»:');
+      maxFlats = n;
+    }
+    const token = await queries.createInviteToken('admin', null, sess.subEndDate, maxFlats);
+    const link = `https://t.me/${config.BOT_USERNAME}?start=${token.token}`;
+    session.clearSession(user.user_id);
+    let msg = `🔗 Ссылка-приглашение для арендодателя:\n${link}\n\nСрок действия: 7 дней.\n`;
+    if (sess.subEndDate || maxFlats) {
+      msg += `Параметры подписки:\n`;
+      if (sess.subEndDate) msg += `  До: ${formatDate(sess.subEndDate)}\n`;
+      if (maxFlats) msg += `  Лимит квартир: ${maxFlats}\n`;
+      msg += `Они будут применены при регистрации.`;
+    } else {
+      msg += `После регистрации используйте /manage_subscription для настройки подписки.`;
+    }
+    await ctx.reply(msg, keyboards.adminMainMenu());
+  }
 }
 
 async function listAdmins(ctx, user) {
@@ -222,13 +266,13 @@ async function listAdmins(ctx, user) {
 async function manageSubscription(ctx, user) {
   const parts = ctx.message.text.split(/\s+/);
   if (parts.length < 4) {
-    return ctx.reply('Использование: /manage_subscription <user_id> <ГГГГ-ММ-ДД> <max_flats>');
+    return ctx.reply('Использование: /manage_subscription <user_id> <ДД.ММ.ГГГГ> <max_flats>');
   }
   const targetUserId = parseInt(parts[1]);
-  const endDate = parts[2];
+  const endDate = parseDateInput(parts[2]);
   const maxFlats = parseInt(parts[3]);
-  if (!targetUserId || !isValidDateStr(endDate) || isNaN(maxFlats) || maxFlats < 1) {
-    return ctx.reply('Некорректные данные. Формат: /manage_subscription <user_id> <ГГГГ-ММ-ДД> <max_flats>');
+  if (!targetUserId || !endDate || isNaN(maxFlats) || maxFlats < 1) {
+    return ctx.reply('Некорректные данные. Формат: /manage_subscription <user_id> <ДД.ММ.ГГГГ> <max_flats>');
   }
   const targetUser = await queries.getUser(targetUserId);
   if (!targetUser) return ctx.reply('Пользователь не найден.');
@@ -304,14 +348,15 @@ async function handleAddAdminInput(ctx, user, bot) {
       return ctx.reply('Пользователь уже зарегистрирован. Используйте /manage_subscription.', keyboards.adminMainMenu());
     }
     session.updateSession(user.user_id, { step: 'end_date', targetId });
-    return ctx.reply('Введите дату окончания подписки (ГГГГ-ММ-ДД):');
+    return ctx.reply('Введите дату окончания подписки (ДД.ММ.ГГГГ):');
   }
 
   if (sess.step === 'end_date') {
-    if (!isValidDateStr(text)) {
-      return ctx.reply('Некорректный формат даты. Используйте ГГГГ-ММ-ДД:');
+    const iso = parseDateInput(text);
+    if (!iso) {
+      return ctx.reply('Некорректный формат даты. Используйте ДД.ММ.ГГГГ:');
     }
-    session.updateSession(user.user_id, { step: 'max_flats', endDate: text });
+    session.updateSession(user.user_id, { step: 'max_flats', endDate: iso });
     return ctx.reply('Введите максимальное количество квартир:');
   }
 
@@ -349,14 +394,15 @@ async function handleTariffInput(ctx, user) {
   return adminCmd.handleTariffInput(ctx, user);
 }
 
-async function handleTariffDate(ctx, user) {
-  return adminCmd.handleTariffDate(ctx, user);
+async function handleTariffDate(ctx, user, bot) {
+  return adminCmd.handleTariffDate(ctx, user, bot);
 }
 
 module.exports = {
   superAdminStart,
   superAdminHelp,
   addFlat,
+  handleAddFlatInput,
   selectFlat,
   listFlats,
   deleteFlatCmd,
@@ -372,6 +418,7 @@ module.exports = {
   setInitialReadings,
   addAdmin,
   inviteAdmin,
+  handleInviteAdminInput,
   listAdmins,
   manageSubscription,
   superAdminStats,

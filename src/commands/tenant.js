@@ -1,7 +1,20 @@
 // Tenant command handlers
 const queries = require('../queries');
-const { formatMoney, formatMoneyShort, monthKey, isValidPositiveNumber, normalizeNumber, formatDate } = require('../utils');
-const { calculateAccrual, buildAccrualDescription } = require('../billing');
+const {
+  formatMoney,
+  formatMoneyShort,
+  monthKey,
+  isValidPositiveNumber,
+  parseNumber,
+  normalizeNumber,
+  formatDate,
+} = require('../utils');
+const {
+  calculateAccrual,
+  calculateIntervalAccrual,
+  calculateFixed,
+  buildAccrualDescription,
+} = require('../billing');
 const keyboards = require('../keyboards');
 const session = require('../session');
 
@@ -12,8 +25,10 @@ async function tenantStart(ctx, user) {
   msg += `Доступные команды:\n`;
   msg += `/submit — передать показания счётчиков\n`;
   msg += `/balance — показать баланс и историю\n`;
+  msg += `/stats — показать статистику по квартире\n`;
+  msg += `/cancel — отменить текущее действие\n`;
   msg += `/help — инструкция`;
-  await ctx.reply(msg);
+  await ctx.reply(msg, keyboards.tenantMainMenu());
 }
 
 async function tenantHelp(ctx) {
@@ -31,7 +46,9 @@ async function tenantHelp(ctx) {
 • Положительный баланс = задолженность
 • Отрицательный баланс = переплата (предоплата)
 
-/stats — показать статистику по квартире (тарифы, показания, баланс)
+📊 /stats — показать статистику по квартире (тарифы, показания, баланс)
+
+❌ /cancel — отменить любое незавершённое действие
 
 ❓ По всем вопросам обращайтесь к арендодателю.`;
   await ctx.reply(msg);
@@ -51,8 +68,9 @@ async function tenantBalance(ctx, user) {
     msg += `Последние операции:\n`;
     for (const t of txns.slice(0, 10)) {
       const date = new Date(t.created_at).toLocaleDateString('ru-RU');
-      const sign = t.type === 'accrual' ? '+' : '-';
-      msg += `${date} | ${t.type === 'accrual' ? 'Начисление' : 'Платёж'} | ${sign}${formatMoneyShort(Math.abs(t.amount))} | ${t.month}\n`;
+      const sign = t.type === 'accrual' || t.type === 'initial' ? '+' : '-';
+      const typeLabel = t.type === 'accrual' ? 'Начисление' : t.type === 'initial' ? 'Нач.баланс' : 'Платёж';
+      msg += `${date} | ${typeLabel} | ${sign}${formatMoneyShort(Math.abs(t.amount))} | ${t.month}\n`;
     }
   }
   await ctx.reply(msg);
@@ -69,7 +87,6 @@ async function submitReadings(ctx, user, bot) {
   const mk = monthKey();
   const existing = await queries.getReadings(user.flat_id, mk);
   if (existing) {
-    // Check if month is still current
     const now = new Date();
     const [m, y] = mk.split('.').map(Number);
     if (now.getMonth() !== m - 1 || now.getFullYear() !== y) {
@@ -89,8 +106,10 @@ async function submitReadings(ctx, user, bot) {
     return ctx.reply('Все тарифы равны 0. Показания не требуются.');
   }
 
-  // Get previous readings
   const prevReadings = await getPreviousReadings(user.flat_id, mk);
+
+  // Check if this is an interval month
+  const isInterval = await queries.isIntervalMonth(user.flat_id, mk);
 
   session.setSession(user.user_id, {
     flow: 'meter_readings',
@@ -100,13 +119,13 @@ async function submitReadings(ctx, user, bot) {
     readings: {},
     prevReadings,
     mk,
+    isInterval,
   });
 
   await askForReading(ctx, user, bot);
 }
 
 async function getPreviousReadings(flatId, currentMonthKey) {
-  // Try to get readings from previous month
   const [m, y] = currentMonthKey.split('.').map(Number);
   const prevDate = new Date(y, m - 2, 1);
   const prevMk = `${String(prevDate.getMonth() + 1).padStart(2, '0')}.${prevDate.getFullYear()}`;
@@ -118,7 +137,6 @@ async function getPreviousReadings(flatId, currentMonthKey) {
       gas: Number(prevReading.gas) || 0,
     };
   }
-  // Fall back to latest readings
   const latest = await queries.getLatestReadings(flatId);
   if (latest) {
     return {
@@ -163,7 +181,7 @@ async function handleReadingInput(ctx, user) {
   const text = ctx.message.text.trim().replace(',', '.');
 
   if (!isValidPositiveNumber(text)) {
-    return ctx.reply('Введите положительное число (разделитель — точка). Попробуйте снова:');
+    return ctx.reply('Введите положительное число (разделитель — точка или запятая). Попробуйте снова:');
   }
 
   const value = normalizeNumber(text);
@@ -229,11 +247,6 @@ async function retryReading(ctx, user, bot) {
 async function finalizeReadings(ctx, user, bot) {
   const sess = session.getSession(user.user_id);
   const flat = await queries.getFlat(sess.flatId);
-  const tariff = await queries.getTariffForMonth(sess.flatId, sess.mk);
-  if (!tariff) {
-    session.clearSession(user.user_id);
-    return ctx.reply('Тариф не найден для текущего месяца. Обратитесь к арендодателю.', keyboards.removeKeyboard());
-  }
 
   const readings = {
     electricity: sess.readings.electricity ?? null,
@@ -241,47 +254,102 @@ async function finalizeReadings(ctx, user, bot) {
     gas: sess.readings.gas ?? null,
   };
   const prevReadings = sess.prevReadings;
+  const mk = sess.mk;
 
-  // Save readings
-  await queries.upsertReadings(sess.flatId, sess.mk, readings, prevReadings);
+  // Save readings (interval-aware)
+  await queries.upsertReadings(sess.flatId, mk, readings, prevReadings, sess.isInterval);
 
   // Delete old accrual if exists (recalculation)
-  await queries.deleteAccrual(sess.flatId, sess.mk);
+  await queries.deleteAccrual(sess.flatId, mk);
 
-  // Calculate accrual
-  const { breakdown, total } = calculateAccrual(readings, prevReadings, tariff, flat);
+  let breakdown, total;
+
+  if (sess.isInterval) {
+    // Interval month: use interval calculation
+    const allReadings = await queries.getAllReadingsForMonth(sess.flatId, mk);
+
+    const getTariffForDate = (dateStr) => {
+      if (!dateStr) {
+        // Use tariff for 1st of month
+        return queries.getTariffForMonth(sess.flatId, mk);
+      }
+      const isoDate = typeof dateStr === 'string' && dateStr.includes('T')
+        ? dateStr.split('T')[0]
+        : dateStr;
+      return queries.getCurrentTariff(sess.flatId, isoDate);
+    };
+
+    // For interval calc we need synchronous tariff lookups, but our queries are async.
+    // Pre-fetch tariffs for all reading dates.
+    const tariffCache = {};
+    for (const r of allReadings) {
+      const isoDate = r.submitted_at ? r.submitted_at.split('T')[0] : null;
+      if (isoDate && !tariffCache[isoDate]) {
+        tariffCache[isoDate] = await queries.getCurrentTariff(sess.flatId, isoDate);
+      }
+    }
+    // Also cache 1st-of-month tariff
+    const firstOfMonthTariff = await queries.getTariffForMonth(sess.flatId, mk);
+    tariffCache['__first__'] = firstOfMonthTariff;
+
+    const syncGetTariff = (dateStr) => {
+      if (!dateStr) return tariffCache['__first__'];
+      const isoDate = dateStr.split('T')[0];
+      return tariffCache[isoDate] || firstOfMonthTariff;
+    };
+
+    const result = calculateIntervalAccrual(allReadings, prevReadings, syncGetTariff, flat);
+    breakdown = result.breakdown;
+    total = result.total;
+  } else {
+    // Normal month: single tariff
+    const tariff = await queries.getTariffForMonth(sess.flatId, mk);
+    if (!tariff) {
+      session.clearSession(user.user_id);
+      return ctx.reply('Тариф не найден для текущего месяца. Обратитесь к арендодателю.', keyboards.removeKeyboard());
+    }
+    const result = calculateAccrual(readings, prevReadings, tariff, flat);
+    breakdown = result.breakdown;
+    total = result.total;
+  }
+
   const description = buildAccrualDescription(breakdown);
+
+  // Get tariff snapshot for the accrual
+  const snapshotTariff = sess.isInterval
+    ? await queries.getTariffForMonth(sess.flatId, mk)
+    : await queries.getTariffForMonth(sess.flatId, mk);
   const tariffsSnapshot = {
-    water: tariff.water,
-    electricity_threshold1: tariff.electricity_threshold1,
-    electricity_tariff1: tariff.electricity_tariff1,
-    electricity_threshold2: tariff.electricity_threshold2,
-    electricity_tariff2: tariff.electricity_tariff2,
-    electricity_tariff3: tariff.electricity_tariff3,
-    gas: tariff.gas,
-    tko: tariff.tko,
-    uk: tariff.uk,
-    caprepair: tariff.caprepair,
+    water: snapshotTariff?.water || 0,
+    electricity_threshold1: snapshotTariff?.electricity_threshold1 || 150,
+    electricity_tariff1: snapshotTariff?.electricity_tariff1 || 0,
+    electricity_threshold2: snapshotTariff?.electricity_threshold2 || 800,
+    electricity_tariff2: snapshotTariff?.electricity_tariff2 || 0,
+    electricity_tariff3: snapshotTariff?.electricity_tariff3 || 0,
+    gas: snapshotTariff?.gas || 0,
+    tko: snapshotTariff?.tko || 0,
+    uk: snapshotTariff?.uk || 0,
+    caprepair: snapshotTariff?.caprepair || 0,
     rent_enabled: flat.rent_enabled,
     rent_amount: flat.rent_amount,
   };
 
-  await queries.createAccrual(sess.flatId, sess.mk, total, description, tariffsSnapshot, user.user_id);
+  await queries.createAccrual(sess.flatId, mk, total, description, tariffsSnapshot, user.user_id);
   const balance = await queries.getBalance(sess.flatId);
 
   // Notify tenant
-  let tenantMsg = `✅ Показания сохранены за ${sess.mk}\n\n`;
+  let tenantMsg = `✅ Показания сохранены за ${mk}\n\n`;
   tenantMsg += `Детализация начисления:\n${description}\n\n`;
   tenantMsg += `Итого начислено: ${formatMoney(total)}\n`;
   tenantMsg += `Текущий баланс: ${formatMoney(balance)}`;
-  await ctx.reply(tenantMsg, keyboards.removeKeyboard());
+  await ctx.reply(tenantMsg, keyboards.tenantMainMenu());
 
   // Notify landlord
   if (bot && flat.admin_user_id) {
     try {
       let adminMsg = `📋 Новые показания от арендатора\n`;
       adminMsg += `Квартира: ${flat.name} (№${flat.id})\n`;
-      adminMsg += `Месяц: ${sess.mk}\n\n`;
+      adminMsg += `Месяц: ${mk}\n\n`;
       adminMsg += `Детализация:\n${description}\n\n`;
       adminMsg += `Итого начислено: ${formatMoney(total)}\n`;
       adminMsg += `Текущий баланс: ${formatMoney(balance)}`;
@@ -293,12 +361,13 @@ async function finalizeReadings(ctx, user, bot) {
 
   session.clearSession(user.user_id);
 }
+
 async function tenantStats(ctx, user) {
   const flatId = user.flat_id;
-  if (!flatId) return ctx.reply('Квартира не найдена...');
-  if (!flat) return ctx.reply('Квартира не найдена. Обратитесь к арендодателю.');
-  
+  if (!flatId) return ctx.reply('Квартира не найдена. Обратитесь к арендодателю.');
   const flat = await queries.getFlat(flatId);
+  if (!flat) return ctx.reply('Квартира не найдена. Обратитесь к арендодателю.');
+
   const tariff = await queries.getCurrentTariff(flatId);
   const readings = await queries.getLatestReadings(flatId);
   const balance = await queries.getBalance(flatId);
@@ -312,7 +381,11 @@ async function tenantStats(ctx, user) {
   msg += `  ТКО: ${tariff?.tko || 0} руб.\n`;
   msg += `  УК: ${tariff?.uk || 0} руб.\n`;
   msg += `  Капремонт: ${tariff?.caprepair || 0} руб.\n`;
-  msg += `  Аренда: ${flat.rent_enabled ? formatMoneyShort(flat.rent_amount) : 'выключена'}\n\n`;
+  msg += `  Аренда: ${flat.rent_enabled ? formatMoneyShort(flat.rent_amount) : 'выключена'}\n`;
+  if (tariff) {
+    msg += `  Действуют с: ${formatDate(tariff.effective_from)}\n`;
+  }
+  msg += `\n`;
   if (readings) {
     msg += `Последние показания (${readings.month}):\n`;
     msg += `  Электричество: ${readings.electricity || '—'}\n`;

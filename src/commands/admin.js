@@ -4,8 +4,10 @@ const {
   formatMoney,
   formatMoneyShort,
   monthKey,
+  parseDateInput,
   isValidDateStr,
   isCurrentOrFutureMonth,
+  parseNumber,
   normalizeNumber,
   round2,
   formatDate,
@@ -29,12 +31,12 @@ async function adminStart(ctx, user) {
 
   let msg = `Здравствуйте! Вы вошли как арендодатель.\n\n`;
   if (flats.length === 0) {
-    msg += `У вас пока нет квартир. Используйте /addflat <название> для создания.`;
+    msg += `У вас пока нет квартир. Используйте /addflat для создания.`;
   } else {
     msg += `Активная квартира: ${selectedFlat ? `${selectedFlat.id}. ${selectedFlat.name}` : 'не выбрана'}\n`;
     msg += `Всего квартир: ${flats.length}\n\n`;
     msg += `Доступные команды:\n`;
-    msg += `/addflat <название> — создать квартиру\n`;
+    msg += `/addflat — создать квартиру\n`;
     msg += `/select_flat <номер> — выбрать квартиру\n`;
     msg += `/flats — список квартир\n`;
     msg += `/deleteflat <номер> — удалить квартиру\n`;
@@ -49,6 +51,7 @@ async function adminStart(ctx, user) {
     msg += `/set_rent <сумма> — установить аренду\n`;
     msg += `/pay — внести платёж\n`;
     msg += `/set_initial_readings <эл> <вода> <газ> — начальные показания\n`;
+    msg += `/cancel — отменить текущее действие\n`;
     msg += `/help — подробная инструкция`;
   }
   await ctx.reply(msg, keyboards.adminMainMenu());
@@ -59,13 +62,13 @@ async function adminHelp(ctx) {
   const msg = `📋 Инструкция для арендодателя
 
 🏠 Квартиры:
-• /addflat <название> — создать новую квартиру
+• /addflat — создать новую квартиру (диалог: название, баланс, тарифы)
 • /select_flat <номер> — выбрать активную квартиру
 • /flats — список всех квартир с балансами
-• /deleteflat <номер> — удалить квартиру (только при нулевом сальдо)
+• /deleteflat <номер> — удалить квартиру (с подтверждением, при любом балансе)
 
 ⚙️ Тарифы (через кнопки меню):
-• Изменение тарифа требует дату начала действия (ГГГГ-ММ-ДД)
+• Изменение тарифа требует дату начала действия (ДД.ММ.ГГГГ)
 • Дата не может быть раньше первого числа текущего месяца
 • Если тариф = 0, показания по этому счётчику не запрашиваются
 • Электричество: 5 чисел (порог1 тариф1 порог2 тариф2 тариф3) или одно число
@@ -77,7 +80,7 @@ async function adminHelp(ctx) {
 • /history — история начислений и платежей
 
 👥 Арендаторы:
-• /invite_tenant — ссылка-приглашение (можно указать срок доступа)
+• /invite_tenant — ссылка-приглашение (без срока доступа)
 • /listusers — список пользователей
 • /removeuser <TelegramID> — удалить пользователя
 
@@ -90,20 +93,18 @@ async function adminHelp(ctx) {
 • /subscribe — информация о подписке
 • /contact_superadmin — связаться с суперадминистратором
 
+❌ /cancel — отменить любое незавершённое действие
+
 📅 Расписание:
 • 23-24 числа — напоминания арендаторам о сдаче показаний
-• 25-е — последний день сдачи показаний
+• 23-е 10:00 — автоначисление фиксированных платежей (если нет показаний)
 • 26-е — уведомление арендодателю о несданных показаниях
 • 8-го числа — напоминание об оплате`;
   await ctx.reply(msg);
 }
 
-// /addflat
+// /addflat — multi-step dialog (Principle 2)
 async function addFlat(ctx, user) {
-  const name = ctx.message.text.replace(/^\/addflat\s*/i, '').trim();
-  if (!name) {
-    return ctx.reply('Укажите название квартиры: /addflat <название>');
-  }
   const sub = await queries.getSubscription(user.user_id);
   if (!sub || !queries.isSubscriptionActive(sub)) {
     return ctx.reply('Ваша подписка истекла. Используйте /contact_superadmin для связи.');
@@ -112,10 +113,197 @@ async function addFlat(ctx, user) {
   if (count >= sub.max_flats) {
     return ctx.reply(`Превышен лимит квартир (${sub.max_flats}). Обратитесь к суперадминистратору.`);
   }
-  const flat = await queries.createFlat(name, user.user_id);
-  await queries.createDefaultTariff(flat.id);
+  session.setSession(user.user_id, { flow: 'add_flat', step: 'name' });
+  await ctx.reply('Введите название квартиры:', keyboards.removeKeyboard());
+}
+
+// Handle add_flat dialog steps
+async function handleAddFlatInput(ctx, user, bot) {
+  const sess = session.getSession(user.user_id);
+  const text = ctx.message.text.trim();
+
+  if (sess.step === 'name') {
+    if (!text) return ctx.reply('Название не может быть пустым. Введите название:');
+    session.updateSession(user.user_id, { step: 'balance', flatName: text });
+    return ctx.reply('Введите начальный баланс (можно пропустить — 0, или введите число, отрицательное = переплата):');
+  }
+
+  if (sess.step === 'balance') {
+    let initialBalance = 0;
+    if (text && text.toLowerCase() !== 'пропустить' && text !== '-') {
+      const n = parseNumber(text);
+      if (n === null) return ctx.reply('Некорректное число. Введите число или «пропустить»:');
+      initialBalance = round2(n);
+    }
+    session.updateSession(user.user_id, { step: 'tariffs_prompt', initialBalance });
+    return ctx.reply(
+      'Хотите настроить тарифы сейчас? (вода, газ, электричество, ТКО, УК, капремонт, аренда)\n' +
+      'Введите «да» для настройки или «пропустить» (все тарифы будут 0):'
+    );
+  }
+
+  if (sess.step === 'tariffs_prompt') {
+    if (text.toLowerCase() === 'да') {
+      session.updateSession(user.user_id, { step: 'tariff_water', tariffData: {} });
+      return ctx.reply('Введите тариф воды (руб./м³, 0 = отключено):');
+    }
+    // Skip tariffs — create flat without tariff_history record
+    await createFlatFinal(ctx, user, sess, false);
+    return;
+  }
+
+  // Tariff setup steps
+  const tariffSteps = ['tariff_water', 'tariff_gas', 'tariff_tko', 'tariff_uk', 'tariff_caprepair', 'tariff_rent'];
+  const stepIndex = tariffSteps.indexOf(sess.step);
+  if (stepIndex >= 0) {
+    const n = parseNumber(text);
+    if (n === null || n < 0) return ctx.reply('Некорректное значение. Введите неотрицательное число:');
+
+    const fieldMap = {
+      tariff_water: 'water',
+      tariff_gas: 'gas',
+      tariff_tko: 'tko',
+      tariff_uk: 'uk',
+      tariff_caprepair: 'caprepair',
+    };
+    if (fieldMap[sess.step]) {
+      sess.tariffData[fieldMap[sess.step]] = n;
+    } else if (sess.step === 'tariff_rent') {
+      sess.tariffData.rent_enabled = n > 0;
+      sess.tariffData.rent_amount = n;
+    }
+    session.updateSession(user.user_id, { tariffData: sess.tariffData });
+
+    if (stepIndex < tariffSteps.length - 1) {
+      const nextStep = tariffSteps[stepIndex + 1];
+      session.updateSession(user.user_id, { step: nextStep });
+      const prompts = {
+        tariff_gas: 'Введите тариф газа (руб./м³, 0 = отключено):',
+        tariff_tko: 'Введите тариф ТКО (руб., 0 = отключено):',
+        tariff_uk: 'Введите тариф УК (руб., 0 = отключено):',
+        tariff_caprepair: 'Введите тариф капремонта (руб., 0 = отключено):',
+        tariff_rent: 'Введите сумму аренды (руб., 0 = отключено):',
+      };
+      return ctx.reply(prompts[nextStep]);
+    }
+
+    // After rent — ask about electricity mode
+    session.updateSession(user.user_id, { step: 'tariff_electricity_mode' });
+    return ctx.reply(
+      'Электричество: выберите режим.\n' +
+      '1 — одноставочный (одно число, тариф за кВт·ч)\n' +
+      '2 — ступенчатый (5 чисел: порог1 тариф1 порог2 тариф2 тариф3)\n' +
+      'Введите 1 или 2 (или 0 для отключения):'
+    );
+  }
+
+  if (sess.step === 'tariff_electricity_mode') {
+    const mode = parseNumber(text);
+    if (mode === 0) {
+      // Electricity disabled
+      sess.tariffData.electricity_tariff1 = 0;
+      sess.tariffData.electricity_tariff2 = 0;
+      sess.tariffData.electricity_tariff3 = 0;
+      session.updateSession(user.user_id, { tariffData: sess.tariffData, step: 'confirm' });
+      return showAddFlatConfirmation(ctx, sess);
+    }
+    if (mode === 1) {
+      session.updateSession(user.user_id, { step: 'tariff_electricity_single' });
+      return ctx.reply('Введите тариф за кВт·ч:');
+    }
+    if (mode === 2) {
+      session.updateSession(user.user_id, { step: 'tariff_electricity_tiered' });
+      return ctx.reply('Введите 5 чисел через пробел: порог1 тариф1 порог2 тариф2 тариф3:');
+    }
+    return ctx.reply('Введите 1, 2 или 0:');
+  }
+
+  if (sess.step === 'tariff_electricity_single') {
+    const n = parseNumber(text);
+    if (n === null || n < 0) return ctx.reply('Некорректное значение. Введите неотрицательное число:');
+    sess.tariffData.electricity_threshold1 = 999999;
+    sess.tariffData.electricity_tariff1 = n;
+    sess.tariffData.electricity_threshold2 = 999999;
+    sess.tariffData.electricity_tariff2 = 0;
+    sess.tariffData.electricity_tariff3 = 0;
+    session.updateSession(user.user_id, { tariffData: sess.tariffData, step: 'confirm' });
+    return showAddFlatConfirmation(ctx, sess);
+  }
+
+  if (sess.step === 'tariff_electricity_tiered') {
+    const parts = text.split(/\s+/).map(s => s.replace(',', '.'));
+    if (parts.length !== 5) return ctx.reply('Нужно 5 чисел. Введите: порог1 тариф1 порог2 тариф2 тариф3:');
+    const [th1, t1, th2, t2, t3] = parts.map(p => parseNumber(p));
+    if ([th1, t1, th2, t2, t3].some(n => n === null || n < 0)) return ctx.reply('Некорректные значения. Введите 5 чисел:');
+    if (th1 >= th2) return ctx.reply('Порог1 должен быть меньше Порога2. Введите заново:');
+    sess.tariffData.electricity_threshold1 = th1;
+    sess.tariffData.electricity_tariff1 = t1;
+    sess.tariffData.electricity_threshold2 = th2;
+    sess.tariffData.electricity_tariff2 = t2;
+    sess.tariffData.electricity_tariff3 = t3;
+    session.updateSession(user.user_id, { tariffData: sess.tariffData, step: 'confirm' });
+    return showAddFlatConfirmation(ctx, sess);
+  }
+
+  if (sess.step === 'confirm') {
+    if (text.toLowerCase() === 'да' || text === '✅ да' || text.toLowerCase() === 'подтвердить') {
+      await createFlatFinal(ctx, user, sess, true);
+    } else {
+      session.clearSession(user.user_id);
+      await ctx.reply('❌ Создание квартиры отменено.', keyboards.adminMainMenu());
+    }
+    return;
+  }
+}
+
+function showAddFlatConfirmation(ctx, sess) {
+  let msg = `Проверьте данные:\n\n`;
+  msg += `Название: ${sess.flatName}\n`;
+  msg += `Начальный баланс: ${sess.initialBalance || 0}\n`;
+  const td = sess.tariffData || {};
+  msg += `\nТарифы:\n`;
+  msg += `  Вода: ${td.water || 0} руб./м³\n`;
+  msg += `  Газ: ${td.gas || 0} руб./м³\n`;
+  msg += `  ТКО: ${td.tko || 0} руб.\n`;
+  msg += `  УК: ${td.uk || 0} руб.\n`;
+  msg += `  Капремонт: ${td.caprepair || 0} руб.\n`;
+  msg += `  Аренда: ${td.rent_enabled ? formatMoneyShort(td.rent_amount) : 'выключена'}\n`;
+  if (td.electricity_tariff1 || td.electricity_tariff2 || td.electricity_tariff3) {
+    if (td.electricity_tariff2 === 0 && td.electricity_tariff3 === 0) {
+      msg += `  Электричество: ${td.electricity_tariff1} руб./кВт·ч (одноставочный)\n`;
+    } else {
+      msg += `  Электричество: пороги ${td.electricity_threshold1}/${td.electricity_threshold2}, тарифы ${td.electricity_tariff1}/${td.electricity_tariff2}/${td.electricity_tariff3}\n`;
+    }
+  } else {
+    msg += `  Электричество: отключено\n`;
+  }
+  msg += `\nПодтвердить создание? (да/нет)`;
+  return ctx.reply(msg);
+}
+
+async function createFlatFinal(ctx, user, sess, withTariffs) {
+  const flat = await queries.createFlat(sess.flatName, user.user_id, sess.initialBalance || 0);
+
+  // If initial balance is non-zero, create an initial transaction
+  if (sess.initialBalance && Math.abs(sess.initialBalance) > 0.001) {
+    await queries.createInitialBalanceTransaction(flat.id, sess.initialBalance, user.user_id);
+  }
+
+  if (withTariffs && sess.tariffData) {
+    const now = new Date();
+    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
+    const firstDayStr = firstDay.toISOString().split('T')[0];
+    await queries.createTariffRecord(flat.id, sess.tariffData, firstDayStr);
+
+    // Set rent if specified
+    if (sess.tariffData.rent_enabled) {
+      await queries.setRent(flat.id, true, sess.tariffData.rent_amount || 0);
+    }
+  }
+
   await queries.setSelectedFlat(user.user_id, flat.id);
-  await ctx.reply(`✅ Квартира «${name}» создана (№${flat.id}). Она выбрана как активная.`);
+  session.clearSession(user.user_id);
+  await ctx.reply(`✅ Квартира «${sess.flatName}» создана (№${flat.id}). Она выбрана как активная.`, keyboards.adminMainMenu());
 }
 
 // /select_flat
@@ -150,7 +338,7 @@ async function listFlats(ctx, user) {
   await ctx.reply(msg);
 }
 
-// /deleteflat
+// /deleteflat — with confirmation (v4.0: any balance allowed)
 async function deleteFlatCmd(ctx, user) {
   const arg = ctx.message.text.replace(/^\/deleteflat\s*/i, '').trim();
   if (!arg) return ctx.reply('Укажите номер квартиры: /deleteflat <номер>');
@@ -160,11 +348,12 @@ async function deleteFlatCmd(ctx, user) {
     return ctx.reply('Квартира не найдена.');
   }
   const balance = await queries.getBalance(flatId);
+  let msg = `⚠️ Вы собираетесь удалить квартиру «${flat.name}» (№${flat.id}).\n`;
   if (Math.abs(balance) > 0.001) {
-    return ctx.reply(`❌ Нельзя удалить квартиру с ненулевым сальдо (${formatMoney(balance)}). Сначала урегулируйте задолженность.`);
+    msg += `Внимание: сальдо не равно нулю (${formatMoney(balance)}). Все данные будут потеряны!\n`;
   }
-  await queries.deleteFlat(flatId);
-  await ctx.reply(`✅ Квартира «${flat.name}» удалена вместе со всеми данными.`);
+  msg += `\nВсе связанные данные (показания, транзакции, тарифы, арендаторы) будут удалены.\n\nПодтвердите удаление:`;
+  await ctx.reply(msg, keyboards.deleteConfirmKeyboard(flatId));
 }
 
 // /history
@@ -176,8 +365,9 @@ async function history(ctx, user) {
   let msg = `История транзакций:\n\n`;
   for (const t of txns.slice(0, 30)) {
     const date = new Date(t.created_at).toLocaleDateString('ru-RU');
-    const sign = t.type === 'accrual' ? '+' : '-';
-    msg += `${date} | ${t.type === 'accrual' ? 'Начисление' : 'Платёж'} | ${sign}${formatMoneyShort(Math.abs(t.amount))} | ${t.month}\n`;
+    const sign = t.type === 'accrual' || t.type === 'initial' ? '+' : '-';
+    const typeLabel = t.type === 'accrual' ? 'Начисление' : t.type === 'initial' ? 'Нач.баланс' : 'Платёж';
+    msg += `${date} | ${typeLabel} | ${sign}${formatMoneyShort(Math.abs(t.amount))} | ${t.month}\n`;
     if (t.description) msg += `   ${t.description.split('\n').join(' ')}\n`;
   }
   const balance = await queries.getBalance(flatId);
@@ -203,7 +393,11 @@ async function stats(ctx, user) {
   msg += `  ТКО: ${tariff?.tko || 0} руб.\n`;
   msg += `  УК: ${tariff?.uk || 0} руб.\n`;
   msg += `  Капремонт: ${tariff?.caprepair || 0} руб.\n`;
-  msg += `  Аренда: ${flat.rent_enabled ? formatMoneyShort(flat.rent_amount) : 'выключена'}\n\n`;
+  msg += `  Аренда: ${flat.rent_enabled ? formatMoneyShort(flat.rent_amount) : 'выключена'}\n`;
+  if (tariff) {
+    msg += `  Действуют с: ${formatDate(tariff.effective_from)}\n`;
+  }
+  msg += `\n`;
   if (readings) {
     msg += `Последние показания (${readings.month}):\n`;
     msg += `  Электричество: ${readings.electricity || '—'}\n`;
@@ -218,16 +412,11 @@ async function stats(ctx, user) {
 async function inviteTenant(ctx, user) {
   const flatId = user.selected_flat_id;
   if (!flatId) return ctx.reply('Сначала выберите квартиру: /select_flat <номер>');
-  const parts = ctx.message.text.split(/\s+/);
-  let accessUntil = null;
-  if (parts[1] && isValidDateStr(parts[1])) {
-    accessUntil = parts[1];
-  }
-  const token = await queries.createInviteToken('tenant', flatId, accessUntil);
+  const token = await queries.createInviteToken('tenant', flatId);
   const link = `https://t.me/${config.BOT_USERNAME}?start=${token.token}`;
   let msg = `🔗 Ссылка-приглашение для арендатора:\n${link}\n\n`;
   msg += `Срок действия ссылки: 7 дней.\n`;
-  msg += accessUntil ? `Доступ арендатора до: ${formatDate(accessUntil)}` : `Доступ бессрочный.`;
+  msg += `Доступ арендатора бессрочный (до удаления администратором).`;
   await ctx.reply(msg);
 }
 
@@ -268,7 +457,7 @@ async function listUsers(ctx, user) {
   let msg = `Арендаторы ваших квартир:\n\n`;
   for (const u of users) {
     const flat = await queries.getFlat(u.flat_id);
-    msg += `${u.user_id} | кв.${u.flat_id} ${flat?.name || ''} | доступ: ${u.access_until ? formatDate(u.access_until) : 'бессрочно'} | ${u.is_active ? 'активен' : 'деактивирован'}\n`;
+    msg += `${u.user_id} | кв.${u.flat_id} ${flat?.name || ''} | ${u.is_active ? 'активен' : 'деактивирован'}\n`;
   }
   await ctx.reply(msg);
 }
@@ -305,8 +494,8 @@ async function toggleRent(ctx, user) {
 async function setRent(ctx, user) {
   const flatId = user.selected_flat_id;
   if (!flatId) return ctx.reply('Сначала выберите квартиру.');
-  const amount = parseFloat(ctx.message.text.replace(/^\/set_rent\s*/i, '').trim().replace(',', '.'));
-  if (isNaN(amount) || amount < 0) return ctx.reply('Укажите корректную сумму: /set_rent <сумма>');
+  const amount = parseNumber(ctx.message.text.replace(/^\/set_rent\s*/i, '').trim());
+  if (amount === null || amount < 0) return ctx.reply('Укажите корректную сумму: /set_rent <сумма>');
   await queries.setRent(flatId, true, round2(amount));
   await ctx.reply(`Сумма аренды установлена: ${formatMoneyShort(amount)} руб./мес.`);
 }
@@ -337,7 +526,7 @@ async function setInitialReadings(ctx, user) {
     return ctx.reply('Использование: /set_initial_readings <электричество> <вода> <газ>');
   }
   const [elec, water, gas] = parts.map(normalizeNumber);
-  if ([elec, water, gas].some(n => isNaN(n) || n < 0)) {
+  if ([elec, water, gas].some(n => n === null || n < 0)) {
     return ctx.reply('Все значения должны быть положительными числами.');
   }
   await queries.setInitialReadings(flatId, elec, water, gas);
@@ -353,8 +542,8 @@ async function contactSuperAdmin(ctx, user) {
 // Handle payment input
 async function handlePaymentInput(ctx, user) {
   const sess = session.getSession(user.user_id);
-  const amount = parseFloat(ctx.message.text.trim().replace(',', '.'));
-  if (isNaN(amount) || amount <= 0) {
+  const amount = parseNumber(ctx.message.text.trim());
+  if (amount === null || amount <= 0) {
     session.clearSession(user.user_id);
     return ctx.reply('Некорректная сумма. Попробуйте снова: /pay', keyboards.adminMainMenu());
   }
@@ -439,8 +628,8 @@ async function handleTariffInput(ctx, user) {
     const parts = text.split(/\s+/).map(n => n.replace(',', '.'));
     let tariffData;
     if (parts.length === 1) {
-      const unified = parseFloat(parts[0]);
-      if (isNaN(unified) || unified < 0) {
+      const unified = parseNumber(parts[0]);
+      if (unified === null || unified < 0) {
         session.clearSession(user.user_id);
         return ctx.reply('Некорректное значение. Попробуйте снова через меню.', keyboards.adminMainMenu());
       }
@@ -452,8 +641,8 @@ async function handleTariffInput(ctx, user) {
         electricity_tariff3: 0,
       };
     } else if (parts.length === 5) {
-      const [th1, t1, th2, t2, t3] = parts.map(parseFloat);
-      if ([th1, t1, th2, t2, t3].some(n => isNaN(n) || n < 0)) {
+      const [th1, t1, th2, t2, t3] = parts.map(p => parseNumber(p));
+      if ([th1, t1, th2, t2, t3].some(n => n === null || n < 0)) {
         session.clearSession(user.user_id);
         return ctx.reply('Некорректные значения. Попробуйте снова.', keyboards.adminMainMenu());
       }
@@ -473,8 +662,8 @@ async function handleTariffInput(ctx, user) {
     }
     session.updateSession(user.user_id, { tariffData });
   } else {
-    const value = parseFloat(text.replace(',', '.'));
-    if (isNaN(value) || value < 0) {
+    const value = parseNumber(text);
+    if (value === null || value < 0) {
       session.clearSession(user.user_id);
       return ctx.reply('Некорректное значение. Попробуйте снова через меню.', keyboards.adminMainMenu());
     }
@@ -482,22 +671,21 @@ async function handleTariffInput(ctx, user) {
   }
 
   session.updateSession(user.user_id, { step: 'tariff_date' });
-  await ctx.reply('Теперь укажите дату начала действия тарифа (ГГГГ-ММ-ДД):');
+  await ctx.reply('Теперь укажите дату начала действия тарифа (ДД.ММ.ГГГГ):');
 }
 
 // Handle tariff date input
-async function handleTariffDate(ctx, user) {
+async function handleTariffDate(ctx, user, bot) {
   const sess = session.getSession(user.user_id);
-  let dateStr = ctx.message.text.trim();
+  const text = ctx.message.text.trim();
 
-  if (!isValidDateStr(dateStr)) {
-    return ctx.reply('Некорректный формат даты. Используйте ГГГГ-ММ-ДД:');
+  const isoDate = parseDateInput(text);
+  if (!isoDate) {
+    return ctx.reply('Некорректный формат даты. Используйте ДД.ММ.ГГГГ:');
   }
 
-  // Приводим дату к первому числу месяца
-  const effectiveDate = toFirstDayOfMonth(dateStr);
+  const effectiveDate = toFirstDayOfMonth(isoDate);
 
-  // Проверяем, что полученная дата не раньше первого числа текущего месяца (опционально)
   if (!isCurrentOrFutureMonth(effectiveDate)) {
     return ctx.reply('❌ Дата не может быть раньше первого числа текущего месяца. Введите снова:');
   }
@@ -520,6 +708,62 @@ async function handleTariffDate(ctx, user) {
   await queries.createTariffRecord(sess.flatId, merged, effectiveDate);
   session.clearSession(user.user_id);
   await ctx.reply(`✅ Тариф обновлён с ${formatDate(effectiveDate)}.`, keyboards.adminMainMenu());
+
+  // Notify tenants and landlord about tariff change (Principle 6)
+  await notifyTariffChange(ctx, sess.flatId, sess.tariffType, currentTariff, merged, effectiveDate, bot);
+}
+
+// Send tariff change notifications (Principle 6)
+async function notifyTariffChange(ctx, flatId, tariffType, oldTariff, newTariffData, effectiveDate, bot) {
+  const flat = await queries.getFlat(flatId);
+  const tariffLabels = {
+    water: 'Вода',
+    gas: 'Газ',
+    tko: 'ТКО',
+    uk: 'УК',
+    caprepair: 'Капремонт',
+    electricity: 'Электричество',
+  };
+  const label = tariffLabels[tariffType] || tariffType;
+
+  let oldVal, newVal;
+  if (tariffType === 'electricity') {
+    oldVal = `тариф1=${oldTariff?.electricity_tariff1 || 0}, тариф2=${oldTariff?.electricity_tariff2 || 0}, тариф3=${oldTariff?.electricity_tariff3 || 0}`;
+    newVal = `тариф1=${newTariffData.electricity_tariff1}, тариф2=${newTariffData.electricity_tariff2}, тариф3=${newTariffData.electricity_tariff3}`;
+  } else {
+    oldVal = `${oldTariff?.[tariffType] || 0} руб.`;
+    newVal = `${newTariffData[tariffType] || 0} руб.`;
+  }
+
+  const now = new Date();
+  const effective = new Date(effectiveDate);
+  const isCurrentMonth = effective.getFullYear() === now.getFullYear() && effective.getMonth() === now.getMonth();
+
+  let msg = `🔔 Изменение тарифа: ${label}\n`;
+  msg += `Квартира: ${flat.name} (№${flat.id})\n`;
+  msg += `Дата начала: ${formatDate(effectiveDate)}\n`;
+  msg += `Старый тариф: ${oldVal}\n`;
+  msg += `Новый тариф: ${newVal}\n\n`;
+
+  if (isCurrentMonth) {
+    msg += `⚠️ Смена тарифа в текущем месяце.\n`;
+    msg += `Рекомендуется передать показания до даты смены, чтобы избежать интервального расчёта.\n`;
+    msg += `Если показания будут переданы только после смены, весь месяц будет рассчитан по новому тарифу.`;
+  } else {
+    msg += `Текущий месяц рассчитывается без изменений.\n`;
+    msg += `Рекомендуется заранее подготовиться к смене тарифа.`;
+  }
+
+  // Notify landlord
+  if (flat.admin_user_id) {
+    try { await ctx.telegram.sendMessage(flat.admin_user_id, msg); } catch (e) { /* ignore */ }
+  }
+
+  // Notify all active tenants
+  const tenants = await queries.getTenantsForFlat(flatId);
+  for (const tenant of tenants) {
+    try { await ctx.telegram.sendMessage(tenant.user_id, msg); } catch (e) { /* ignore */ }
+  }
 }
 
 async function summary(ctx, user) {
@@ -528,9 +772,7 @@ async function summary(ctx, user) {
 
   let totalDebt = 0;
   let totalOverpay = 0;
-  let msg = `📊 Сводка по вашим квартирам:
-
-`;
+  let msg = `📊 Сводка по вашим квартирам:\n\n`;
   for (const f of flats) {
     const balance = await queries.getBalance(f.id);
     if (balance > 0) totalDebt += balance;
@@ -549,6 +791,7 @@ module.exports = {
   adminStart,
   adminHelp,
   addFlat,
+  handleAddFlatInput,
   selectFlat,
   listFlats,
   deleteFlatCmd,
@@ -569,4 +812,5 @@ module.exports = {
   handleTariffChange,
   handleTariffInput,
   handleTariffDate,
+  notifyTariffChange,
 };

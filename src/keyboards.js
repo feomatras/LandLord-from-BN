@@ -12,6 +12,13 @@ function adminMainMenu() {
   ]).resize();
 }
 
+function tenantMainMenu() {
+  return Markup.keyboard([
+    ['Передать показания', 'Баланс'],
+    ['Статистика', 'Главное меню'],
+  ]).resize();
+}
+
 function confirmKeyboard() {
   return Markup.inlineKeyboard([
     [
@@ -27,6 +34,15 @@ function payKeyboard() {
   ]);
 }
 
+function deleteConfirmKeyboard(flatId) {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback('✅ Да, удалить', `confirm_delete_flat_${flatId}`),
+      Markup.button.callback('❌ Отмена', 'cancel_delete_flat'),
+    ],
+  ]);
+}
+
 function flatListKeyboard(flats) {
   const buttons = flats.map(f => [Markup.button.callback(`${f.id}. ${f.name}`, `select_flat_${f.id}`)]);
   return Markup.inlineKeyboard(buttons);
@@ -38,8 +54,10 @@ function removeKeyboard() {
 
 module.exports = {
   adminMainMenu,
+  tenantMainMenu,
   confirmKeyboard,
   payKeyboard,
+  deleteConfirmKeyboard,
   flatListKeyboard,
   removeKeyboard,
 };

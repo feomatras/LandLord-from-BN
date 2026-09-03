@@ -13,7 +13,7 @@ function isTenant(user) {
 }
 
 function isAdmin(user) {
-  return user && user.role === 'admin';
+  return user && (user.role === 'admin' || user.role === 'super_admin');
 }
 
 function isSuperAdmin(user) {
@@ -23,11 +23,7 @@ function isSuperAdmin(user) {
 function isTenantAccessValid(user) {
   if (!user) return false;
   if (user.role !== 'tenant') return true;
-  if (!user.is_active) return false;
-  if (user.access_until) {
-    return new Date(user.access_until) >= new Date(new Date().toISOString().split('T')[0]);
-  }
-  return true;
+  return !!user.is_active;
 }
 
 async function checkSubscriptionActive(adminUserId) {
