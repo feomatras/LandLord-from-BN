@@ -1,9 +1,9 @@
 // Scheduler: cron-based reminders and notifications
 const cron = require('node-cron');
-const queries = require('../queries');
-const { formatMoney, formatMoneyShort, monthKey, prevMonthKey } = require('../utils');
-const keyboards = require('../keyboards');
-const { calculateFixedOnlyAccrual, buildAccrualDescription } = require('../billing');
+const queries = require('./queries');
+const { formatMoney, formatMoneyShort, monthKey, prevMonthKey } = require('./utils');
+const keyboards = require('./keyboards');
+const { calculateFixedOnlyAccrual, buildAccrualDescription } = require('./billing');
 
 function setupScheduler(bot) {
   // 23rd of each month at 10:00 — remind tenants to submit readings
