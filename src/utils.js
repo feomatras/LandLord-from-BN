@@ -60,12 +60,18 @@ function isValidDateStr(str) {
 }
 
 function isCurrentOrFutureMonth(dateStr) {
-  if (!isValidDateStr(dateStr)) return false;
-  const iso = parseDateInput(dateStr);
+  if (!dateStr) return false;
+  // Accept both DD.MM.YYYY and YYYY-MM-DD formats
+  const iso = parseDateInput(dateStr) || (isValidIsoDate(dateStr) ? dateStr : null);
+  if (!iso) return false;
   const d = new Date(iso);
   const now = new Date();
   const firstOfCurrent = new Date(now.getFullYear(), now.getMonth(), 1);
   return d >= firstOfCurrent;
+}
+
+function isValidIsoDate(str) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(str) && !isNaN(new Date(str).getTime());
 }
 
 function isValidPositiveNumber(str) {

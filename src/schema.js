@@ -103,31 +103,19 @@ CREATE INDEX IF NOT EXISTS idx_sub_admin ON subscriptions(admin_user_id);
 CREATE INDEX IF NOT EXISTS idx_invite_token ON invite_tokens(token);
 `;
 
-const MIGRATION_SQL = `
--- Add balance column to flats if missing
-ALTER TABLE flats ADD COLUMN balance NUMERIC(10,2) NOT NULL DEFAULT 0;
-
--- Add submitted_at column to meter_readings if missing
-ALTER TABLE meter_readings ADD COLUMN submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP;
-`;
-
-const TOKEN_MIGRATION_SQL = `
--- Add subscription param columns to invite_tokens if missing
-ALTER TABLE invite_tokens ADD COLUMN sub_end_date TEXT;
-ALTER TABLE invite_tokens ADD COLUMN sub_max_flats INTEGER;
-`;
-
 function columnExists(tableName, columnName) {
-  const row = db.prepare(`PRAGMA table_info(${tableName})`).get();
   const cols = db.prepare(`PRAGMA table_info(${tableName})`).all();
   return cols.some(c => c.name === columnName);
 }
 
 function runMigration() {
+  let balanceAdded = false;
+
   // Add flats.balance if missing
   if (!columnExists('flats', 'balance')) {
     db.exec('ALTER TABLE flats ADD COLUMN balance NUMERIC(10,2) NOT NULL DEFAULT 0;');
     console.log('[DB] Migrated: added flats.balance');
+    balanceAdded = true;
   }
 
   // Add meter_readings.submitted_at if missing
@@ -146,17 +134,19 @@ function runMigration() {
     console.log('[DB] Migrated: added invite_tokens.sub_max_flats');
   }
 
-  // Backfill flats.balance from transactions for existing flats
-  const flats = db.prepare('SELECT id FROM flats').all();
-  for (const flat of flats) {
-    const row = db.prepare(
-      'SELECT COALESCE(SUM(amount), 0) AS balance FROM transactions WHERE flat_id = ?'
-    ).get(flat.id);
-    const bal = row ? Math.round(row.balance * 100) / 100 : 0;
-    db.prepare('UPDATE flats SET balance = ? WHERE id = ?').run(bal, flat.id);
-  }
-  if (flats.length > 0) {
-    console.log(`[DB] Backfilled balance for ${flats.length} flats`);
+  // Only backfill flats.balance from transactions when the column was just added
+  if (balanceAdded) {
+    const flats = db.prepare('SELECT id FROM flats').all();
+    for (const flat of flats) {
+      const row = db.prepare(
+        'SELECT COALESCE(SUM(amount), 0) AS balance FROM transactions WHERE flat_id = ?'
+      ).get(flat.id);
+      const bal = row ? Math.round(row.balance * 100) / 100 : 0;
+      db.prepare('UPDATE flats SET balance = ? WHERE id = ?').run(bal, flat.id);
+    }
+    if (flats.length > 0) {
+      console.log(`[DB] Backfilled balance for ${flats.length} flats`);
+    }
   }
 }
 

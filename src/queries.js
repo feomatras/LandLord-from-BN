@@ -1,6 +1,6 @@
 // Data access layer: all database queries via better-sqlite3
 const { query, queryOne, queryAll, db } = require('./db');
-const { prevMonthKey, generateToken, parseDateInput } = require('./utils');
+const { prevMonthKey, monthKey, generateToken, parseDateInput } = require('./utils');
 
 // ---- Users ----
 async function getUser(userId) {
