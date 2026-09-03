@@ -2,28 +2,28 @@
 const { db } = require('./db');
 
 const SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS users (
+  user_id INTEGER PRIMARY KEY,
+  role TEXT NOT NULL DEFAULT 'tenant',
+  flat_id INTEGER,
+  selected_flat_id INTEGER,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS flats (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   rent_enabled INTEGER NOT NULL DEFAULT 0,
   rent_amount NUMERIC NOT NULL DEFAULT 0,
   balance NUMERIC(10,2) NOT NULL DEFAULT 0,
-  admin_user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS users (
-  user_id INTEGER PRIMARY KEY,
-  role TEXT NOT NULL DEFAULT 'tenant',
-  flat_id INTEGER REFERENCES flats(id) ON DELETE SET NULL,
-  selected_flat_id INTEGER,
-  is_active INTEGER NOT NULL DEFAULT 1,
+  admin_user_id INTEGER,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS tariff_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  flat_id INTEGER NOT NULL REFERENCES flats(id) ON DELETE CASCADE,
+  flat_id INTEGER NOT NULL,
   water NUMERIC NOT NULL DEFAULT 0,
   electricity_threshold1 NUMERIC NOT NULL DEFAULT 150,
   electricity_tariff1 NUMERIC NOT NULL DEFAULT 0,
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS tariff_history (
 
 CREATE TABLE IF NOT EXISTS meter_readings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  flat_id INTEGER NOT NULL REFERENCES flats(id) ON DELETE CASCADE,
+  flat_id INTEGER NOT NULL,
   month TEXT NOT NULL,
   electricity NUMERIC,
   water NUMERIC,
@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS meter_readings (
 
 CREATE TABLE IF NOT EXISTS transactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  flat_id INTEGER NOT NULL REFERENCES flats(id) ON DELETE CASCADE,
+  flat_id INTEGER NOT NULL,
   month TEXT NOT NULL,
   amount NUMERIC NOT NULL,
   type TEXT NOT NULL,
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS transactions (
 
 CREATE TABLE IF NOT EXISTS subscriptions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  admin_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  admin_user_id INTEGER NOT NULL,
   end_date TEXT NOT NULL,
   max_flats INTEGER NOT NULL DEFAULT 1,
   deletion_scheduled_at TEXT,
@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS invite_tokens (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   token TEXT NOT NULL UNIQUE,
   role TEXT NOT NULL,
-  flat_id INTEGER REFERENCES flats(id) ON DELETE CASCADE,
+  flat_id INTEGER,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   expires_at TEXT,
   used INTEGER NOT NULL DEFAULT 0,
@@ -111,20 +111,17 @@ function columnExists(tableName, columnName) {
 function runMigration() {
   let balanceAdded = false;
 
-  // Add flats.balance if missing
   if (!columnExists('flats', 'balance')) {
     db.exec('ALTER TABLE flats ADD COLUMN balance NUMERIC(10,2) NOT NULL DEFAULT 0;');
     console.log('[DB] Migrated: added flats.balance');
     balanceAdded = true;
   }
 
-  // Add meter_readings.submitted_at if missing
   if (!columnExists('meter_readings', 'submitted_at')) {
     db.exec('ALTER TABLE meter_readings ADD COLUMN submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP;');
     console.log('[DB] Migrated: added meter_readings.submitted_at');
   }
 
-  // Add invite_tokens subscription params if missing
   if (!columnExists('invite_tokens', 'sub_end_date')) {
     db.exec('ALTER TABLE invite_tokens ADD COLUMN sub_end_date TEXT;');
     console.log('[DB] Migrated: added invite_tokens.sub_end_date');
@@ -134,7 +131,6 @@ function runMigration() {
     console.log('[DB] Migrated: added invite_tokens.sub_max_flats');
   }
 
-  // Only backfill flats.balance from transactions when the column was just added
   if (balanceAdded) {
     const flats = db.prepare('SELECT id FROM flats').all();
     for (const flat of flats) {
