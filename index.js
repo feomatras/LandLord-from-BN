@@ -311,9 +311,23 @@ bot.command('balance', async (ctx) => {
 
 bot.command('submit', async (ctx) => {
   const user = await getCtxUser(ctx);
+  if (!user) return ctx.reply('По всем вопросам обращаться @Cheatgtp');
+  if (user.role === 'tenant') {
+    if (!auth.isTenantAccessValid(user)) return ctx.reply('Ваш доступ истёк. По всем вопросам обращаться @Cheatgtp');
+    return tenantCmd.submitReadings(ctx, user, bot);
+  }
+  if (user.role === 'admin' || user.role === 'super_admin') {
+    if (user.role === 'admin' && (await isExpiredForAdmin(user))) return ctx.reply('Подписка истекла. /contact_superadmin');
+    return tenantCmd.submitReadings(ctx, user, bot);
+  }
+  return ctx.reply('По всем вопросам обращаться @Cheatgtp');
+});
+
+bot.command('delete_me', async (ctx) => {
+  const user = await getCtxUser(ctx);
   if (!user || user.role !== 'tenant') return ctx.reply('По всем вопросам обращаться @Cheatgtp');
   if (!auth.isTenantAccessValid(user)) return ctx.reply('Ваш доступ истёк. По всем вопросам обращаться @Cheatgtp');
-  await tenantCmd.submitReadings(ctx, user, bot);
+  await tenantCmd.deleteMe(ctx, user, bot);
 });
 
 // ---- Super admin commands ----
@@ -356,14 +370,26 @@ bot.command('backup', async (ctx) => {
 // ---- Callback query handlers ----
 bot.action('confirm_reading', async (ctx) => {
   const user = await getCtxUser(ctx);
-  if (!user || user.role !== 'tenant') return ctx.answerCbQuery('Ошибка');
+  if (!user) return ctx.answerCbQuery('Ошибка');
   await tenantCmd.confirmReading(ctx, user, bot);
 });
 
 bot.action('retry_reading', async (ctx) => {
   const user = await getCtxUser(ctx);
-  if (!user || user.role !== 'tenant') return ctx.answerCbQuery('Ошибка');
+  if (!user) return ctx.answerCbQuery('Ошибка');
   await tenantCmd.retryReading(ctx, user, bot);
+});
+
+bot.action('confirm_delete_me', async (ctx) => {
+  const user = await getCtxUser(ctx);
+  if (!user || user.role !== 'tenant') return ctx.answerCbQuery('Ошибка');
+  await tenantCmd.confirmDeleteMe(ctx, user, bot);
+});
+
+bot.action('cancel_delete_me', async (ctx) => {
+  const user = await getCtxUser(ctx);
+  if (!user || user.role !== 'tenant') return ctx.answerCbQuery('Ошибка');
+  await tenantCmd.cancelDeleteMe(ctx, user);
 });
 
 bot.action('pay_action', async (ctx) => {
@@ -466,7 +492,7 @@ bot.on('text', async (ctx) => {
       if (sess.step === 'tariff_date') return adminCmd.handleTariffDate(ctx, user, bot);
       return adminCmd.handleTariffInput(ctx, user);
     }
-    if (sess.flow === 'meter_readings' && user.role === 'tenant') {
+    if (sess.flow === 'meter_readings' && (user.role === 'tenant' || user.role === 'admin' || user.role === 'super_admin')) {
       return tenantCmd.handleReadingInput(ctx, user);
     }
     if (sess.flow === 'add_admin' && user.role === 'super_admin') {

@@ -48,6 +48,8 @@ async function tenantHelp(ctx) {
 
 📊 /stats — показать статистику по квартире (тарифы, показания, баланс)
 
+🗑 /delete_me — деактивировать свой аккаунт и покинуть систему
+
 ❌ /cancel — отменить любое незавершённое действие
 
 ❓ По всем вопросам обращайтесь к арендодателю.`;
@@ -78,14 +80,26 @@ async function tenantBalance(ctx, user) {
 
 // Start meter reading submission flow
 async function submitReadings(ctx, user, bot) {
-  const flat = await queries.getFlat(user.flat_id);
+  const isLandlord = user.role === 'admin' || user.role === 'super_admin';
+  const flatId = isLandlord ? user.selected_flat_id : user.flat_id;
+  if (!flatId) {
+    return ctx.reply(isLandlord ? 'Сначала выберите квартиру: /select_flat <номер>' : 'Квартира не найдена.');
+  }
+  const flat = await queries.getFlat(flatId);
   if (!flat) return ctx.reply('Квартира не найдена.');
 
-  const tariff = await queries.getCurrentTariff(user.flat_id);
+  if (isLandlord) {
+    const tenants = await queries.getTenantsForFlat(flatId);
+    if (tenants.length > 0) {
+      return ctx.reply('В этой квартире есть активные арендаторы. Они должны самостоятельно передавать показания.');
+    }
+  }
+
+  const tariff = await queries.getCurrentTariff(flatId);
   if (!tariff) return ctx.reply('Тарифы не настроены. Обратитесь к арендодателю.');
 
   const mk = monthKey();
-  const existing = await queries.getReadings(user.flat_id, mk);
+  const existing = await queries.getReadings(flatId, mk);
   if (existing) {
     const now = new Date();
     const [m, y] = mk.split('.').map(Number);
@@ -106,20 +120,21 @@ async function submitReadings(ctx, user, bot) {
     return ctx.reply('Все тарифы равны 0. Показания не требуются.');
   }
 
-  const prevReadings = await getPreviousReadings(user.flat_id, mk);
+  const prevReadings = await getPreviousReadings(flatId, mk);
 
   // Check if this is an interval month
-  const isInterval = await queries.isIntervalMonth(user.flat_id, mk);
+  const isInterval = await queries.isIntervalMonth(flatId, mk);
 
   session.setSession(user.user_id, {
     flow: 'meter_readings',
-    flatId: user.flat_id,
+    flatId,
     meters,
     currentIndex: 0,
     readings: {},
     prevReadings,
     mk,
     isInterval,
+    isLandlord,
   });
 
   await askForReading(ctx, user, bot);
@@ -337,15 +352,16 @@ async function finalizeReadings(ctx, user, bot) {
   await queries.createAccrual(sess.flatId, mk, total, description, tariffsSnapshot, user.user_id);
   const balance = await queries.getBalance(sess.flatId);
 
-  // Notify tenant
-  let tenantMsg = `✅ Показания сохранены за ${mk}\n\n`;
-  tenantMsg += `Детализация начисления:\n${description}\n\n`;
-  tenantMsg += `Итого начислено: ${formatMoney(total)}\n`;
-  tenantMsg += `Текущий баланс: ${formatMoney(balance)}`;
-  await ctx.reply(tenantMsg, keyboards.tenantMainMenu());
+  // Notify submitter
+  let submitterMsg = `✅ Показания сохранены за ${mk}\n\n`;
+  submitterMsg += `Детализация начисления:\n${description}\n\n`;
+  submitterMsg += `Итого начислено: ${formatMoney(total)}\n`;
+  submitterMsg += `Текущий баланс: ${formatMoney(balance)}`;
+  const replyKeyboard = sess.isLandlord ? keyboards.adminMainMenu() : keyboards.tenantMainMenu();
+  await ctx.reply(submitterMsg, replyKeyboard);
 
-  // Notify landlord
-  if (bot && flat.admin_user_id) {
+  // Notify landlord (only if submitter is a tenant)
+  if (bot && flat.admin_user_id && !sess.isLandlord) {
     try {
       let adminMsg = `📋 Новые показания от арендатора\n`;
       adminMsg += `Квартира: ${flat.name} (№${flat.id})\n`;
@@ -396,6 +412,54 @@ async function tenantStats(ctx, user) {
   await ctx.reply(msg);
 }
 
+// /delete_me — tenant self-deactivation with confirmation
+async function deleteMe(ctx, user, bot) {
+  if (!user.is_active) {
+    return ctx.reply('Ваш аккаунт уже деактивирован.');
+  }
+  const flat = await queries.getFlat(user.flat_id);
+  session.setSession(user.user_id, { flow: 'delete_me', flatId: user.flat_id, flatAdminId: flat?.admin_user_id });
+  await ctx.reply(
+    '⚠️ Вы уверены, что хотите деактивировать свой аккаунт?\n\n' +
+    'Ваши данные (показания, транзакции) будут сохранены для истории.\n' +
+    'После деактивации вы не сможете передавать показания и получать уведомления.\n' +
+    'Для восстановления обратитесь к арендодателю.',
+    keyboards.deleteMeConfirmKeyboard()
+  );
+}
+
+async function confirmDeleteMe(ctx, user, bot) {
+  const sess = session.getSession(user.user_id);
+  if (!sess || sess.flow !== 'delete_me') return;
+
+  const flatAdminId = sess.flatAdminId;
+  const flatId = sess.flatId;
+
+  await queries.deactivateTenantAndClearFlat(user.user_id);
+
+  session.clearSession(user.user_id);
+  await ctx.answerCbQuery('Аккаунт деактивирован');
+  await ctx.editMessageText(
+    '✅ Ваш аккаунт деактивирован. Данные сохранены для истории. ' +
+    'Если захотите восстановиться, обратитесь к арендодателю.'
+  );
+
+  if (bot && flatAdminId) {
+    try {
+      await bot.telegram.sendMessage(
+        flatAdminId,
+        `👤 Арендатор ${user.user_id} покинул систему и деактивирован.`
+      );
+    } catch (e) { /* landlord may have blocked bot */ }
+  }
+}
+
+async function cancelDeleteMe(ctx, user) {
+  session.clearSession(user.user_id);
+  await ctx.answerCbQuery('Удаление отменено');
+  await ctx.editMessageText('❌ Удаление аккаунта отменено. Вы остаётесь в системе.');
+}
+
 module.exports = {
   tenantStart,
   tenantHelp,
@@ -406,4 +470,7 @@ module.exports = {
   confirmReading,
   retryReading,
   finalizeReadings,
+  deleteMe,
+  confirmDeleteMe,
+  cancelDeleteMe,
 };

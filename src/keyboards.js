@@ -43,6 +43,15 @@ function deleteConfirmKeyboard(flatId) {
   ]);
 }
 
+function deleteMeConfirmKeyboard() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback('✅ Да, удалить', 'confirm_delete_me'),
+      Markup.button.callback('❌ Отмена', 'cancel_delete_me'),
+    ],
+  ]);
+}
+
 function flatListKeyboard(flats) {
   const buttons = flats.map(f => [Markup.button.callback(`${f.id}. ${f.name}`, `select_flat_${f.id}`)]);
   return Markup.inlineKeyboard(buttons);
@@ -58,6 +67,7 @@ module.exports = {
   confirmKeyboard,
   payKeyboard,
   deleteConfirmKeyboard,
+  deleteMeConfirmKeyboard,
   flatListKeyboard,
   removeKeyboard,
 };

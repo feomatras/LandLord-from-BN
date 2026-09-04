@@ -105,13 +105,15 @@ async function adminHelp(ctx) {
 
 // /addflat — multi-step dialog (Principle 2)
 async function addFlat(ctx, user) {
-  const sub = await queries.getSubscription(user.user_id);
-  if (!sub || !queries.isSubscriptionActive(sub)) {
-    return ctx.reply('Ваша подписка истекла. Используйте /contact_superadmin для связи.');
-  }
-  const count = await queries.countFlatsForAdmin(user.user_id);
-  if (count >= sub.max_flats) {
-    return ctx.reply(`Превышен лимит квартир (${sub.max_flats}). Обратитесь к суперадминистратору.`);
+  if (user.role !== 'super_admin') {
+    const sub = await queries.getSubscription(user.user_id);
+    if (!sub || !queries.isSubscriptionActive(sub)) {
+      return ctx.reply('Ваша подписка истекла. Используйте /contact_superadmin для связи.');
+    }
+    const count = await queries.countFlatsForAdmin(user.user_id);
+    if (count >= sub.max_flats) {
+      return ctx.reply(`Превышен лимит квартир (${sub.max_flats}). Обратитесь к суперадминистратору.`);
+    }
   }
   session.setSession(user.user_id, { flow: 'add_flat', step: 'name' });
   await ctx.reply('Введите название квартиры:', keyboards.removeKeyboard());
@@ -135,7 +137,29 @@ async function handleAddFlatInput(ctx, user, bot) {
       if (n === null) return ctx.reply('Некорректное число. Введите число или «пропустить»:');
       initialBalance = round2(n);
     }
-    session.updateSession(user.user_id, { step: 'tariffs_prompt', initialBalance });
+    session.updateSession(user.user_id, { step: 'initial_readings', initialBalance });
+    return ctx.reply(
+      'Введите начальные показания счётчиков (электричество, вода, газ) через пробел или «пропустить»:'
+    );
+  }
+
+  if (sess.step === 'initial_readings') {
+    if (text.toLowerCase() === 'пропустить' || text === '') {
+      session.updateSession(user.user_id, { step: 'tariffs_prompt', initialReadings: null });
+      return ctx.reply(
+        'Хотите настроить тарифы сейчас? (вода, газ, электричество, ТКО, УК, капремонт, аренда)\n' +
+        'Введите «да» для настройки или «пропустить» (все тарифы будут 0):'
+      );
+    }
+    const parts = text.split(/\s+/).map(s => s.replace(',', '.'));
+    if (parts.length !== 3) {
+      return ctx.reply('Нужно 3 числа (электричество, вода, газ) через пробел или «пропустить»:');
+    }
+    const [elec, water, gas] = parts.map(p => parseNumber(p));
+    if ([elec, water, gas].some(n => n === null || n < 0)) {
+      return ctx.reply('Все значения должны быть неотрицательными числами. Введите заново или «пропустить»:');
+    }
+    session.updateSession(user.user_id, { step: 'tariffs_prompt', initialReadings: { elec, water, gas } });
     return ctx.reply(
       'Хотите настроить тарифы сейчас? (вода, газ, электричество, ТКО, УК, капремонт, аренда)\n' +
       'Введите «да» для настройки или «пропустить» (все тарифы будут 0):'
@@ -260,6 +284,9 @@ function showAddFlatConfirmation(ctx, sess) {
   let msg = `Проверьте данные:\n\n`;
   msg += `Название: ${sess.flatName}\n`;
   msg += `Начальный баланс: ${sess.initialBalance || 0}\n`;
+  if (sess.initialReadings) {
+    msg += `Начальные показания: эл=${sess.initialReadings.elec}, вода=${sess.initialReadings.water}, газ=${sess.initialReadings.gas}\n`;
+  }
   const td = sess.tariffData || {};
   msg += `\nТарифы:\n`;
   msg += `  Вода: ${td.water || 0} руб./м³\n`;
@@ -299,6 +326,11 @@ async function createFlatFinal(ctx, user, sess, withTariffs) {
     if (sess.tariffData.rent_enabled) {
       await queries.setRent(flat.id, true, sess.tariffData.rent_amount || 0);
     }
+  }
+
+  // Save initial meter readings if provided
+  if (sess.initialReadings) {
+    await queries.setInitialReadings(flat.id, sess.initialReadings.elec, sess.initialReadings.water, sess.initialReadings.gas);
   }
 
   await queries.setSelectedFlat(user.user_id, flat.id);
@@ -560,6 +592,17 @@ async function handlePaymentInput(ctx, user) {
     `✅ Платёж ${formatMoneyShort(amount)} внесён.\nНовый баланс: ${formatMoney(balance)}`,
     keyboards.adminMainMenu()
   );
+
+  // Notify all active tenants of this flat
+  const tenants = await queries.getTenantsForFlat(sess.flatId);
+  for (const tenant of tenants) {
+    try {
+      await ctx.telegram.sendMessage(
+        tenant.user_id,
+        `💰 Внесён платёж на сумму ${formatMoneyShort(amount)} руб.\nНовый баланс: ${formatMoney(balance)} руб.`
+      );
+    } catch (e) { /* tenant may have blocked bot or left chat */ }
+  }
 }
 
 // Handle contact_superadmin input

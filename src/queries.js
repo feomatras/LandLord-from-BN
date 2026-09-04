@@ -19,6 +19,10 @@ async function deactivateUser(userId) {
   await query('UPDATE users SET is_active = 0 WHERE user_id = ?', [userId]);
 }
 
+async function deactivateTenantAndClearFlat(userId) {
+  await query('UPDATE users SET is_active = 0, flat_id = NULL WHERE user_id = ?', [userId]);
+}
+
 async function reactivateTenant(userId, flatId) {
   return queryOne(
     `UPDATE users SET role = 'tenant', flat_id = ?, is_active = 1
@@ -455,6 +459,7 @@ module.exports = {
   getUser,
   createUser,
   deactivateUser,
+  deactivateTenantAndClearFlat,
   reactivateTenant,
   setSelectedFlat,
   listUsersForAdmin,
