@@ -8,15 +8,22 @@ function adminMainMenu() {
     ['Изменить тариф УК', 'Изменить Капремонт'],
     ['Настройка аренды', 'Внести платеж'],
     ['Мои квартиры', 'История платежей'],
-    ['Главное меню'],
+    ['Поддержка', 'Главное меню'],
   ]).resize();
 }
 
 function tenantMainMenu() {
   return Markup.keyboard([
     ['Передать показания', 'Баланс'],
-    ['Статистика', 'Главное меню'],
+    ['Статистика', 'Поддержка'],
+    ['Главное меню'],
   ]).resize();
+}
+
+function trialStartKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('🚀 Начать 14-дневный пробный период', 'start_trial')],
+  ]);
 }
 
 function confirmKeyboard() {
@@ -64,6 +71,7 @@ function removeKeyboard() {
 module.exports = {
   adminMainMenu,
   tenantMainMenu,
+  trialStartKeyboard,
   confirmKeyboard,
   payKeyboard,
   deleteConfirmKeyboard,

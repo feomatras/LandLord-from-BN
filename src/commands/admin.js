@@ -91,7 +91,7 @@ async function adminHelp(ctx) {
 
 📌 Подписка:
 • /subscribe — информация о подписке
-• /contact_superadmin — связаться с суперадминистратором
+• /support — связь с поддержкой (можно прикрепить фото/документ)
 
 ❌ /cancel — отменить любое незавершённое действие
 
@@ -108,11 +108,14 @@ async function addFlat(ctx, user) {
   if (user.role !== 'super_admin') {
     const sub = await queries.getSubscription(user.user_id);
     if (!sub || !queries.isSubscriptionActive(sub)) {
-      return ctx.reply('Ваша подписка истекла. Используйте /contact_superadmin для связи.');
+      return ctx.reply('Ваша подписка истекла. Для восстановления доступа используйте /support.');
     }
     const count = await queries.countFlatsForAdmin(user.user_id);
     if (count >= sub.max_flats) {
-      return ctx.reply(`Превышен лимит квартир (${sub.max_flats}). Обратитесь к суперадминистратору.`);
+      if (queries.isTrialSubscription(sub)) {
+        return ctx.reply('Пробный период позволяет только 1 квартиру. Оформите подписку для снятия ограничений.');
+      }
+      return ctx.reply(`Превышен лимит квартир (${sub.max_flats}). Обратитесь к суперадминистратору через /support.`);
     }
   }
   session.setSession(user.user_id, { flow: 'add_flat', step: 'name' });
@@ -444,6 +447,17 @@ async function stats(ctx, user) {
 async function inviteTenant(ctx, user) {
   const flatId = user.selected_flat_id;
   if (!flatId) return ctx.reply('Сначала выберите квартиру: /select_flat <номер>');
+
+  if (user.role !== 'super_admin') {
+    const sub = await queries.getSubscription(user.user_id);
+    if (queries.isTrialSubscription(sub)) {
+      const tenantCount = await queries.countTenantsForAdmin(user.user_id);
+      if (tenantCount >= 2) {
+        return ctx.reply('Пробный период позволяет пригласить не более 2 арендаторов. Оформите подписку для снятия ограничений.');
+      }
+    }
+  }
+
   const token = await queries.createInviteToken('tenant', flatId);
   const link = `https://t.me/${config.BOT_USERNAME}?start=${token.token}`;
   let msg = `🔗 Ссылка-приглашение для арендатора:\n${link}\n\n`;
@@ -507,7 +521,7 @@ async function subscribeInfo(ctx, user) {
   msg += `Использовано квартир: ${count}\n`;
   if (!active) {
     msg += `\n⚠️ Подписка истекла. Данные хранятся 3 месяца, затем будут удалены.\n`;
-    msg += `Используйте /contact_superadmin для связи.`;
+    msg += `Используйте /support для связи с поддержкой.`;
   }
   await ctx.reply(msg);
 }
@@ -565,12 +579,6 @@ async function setInitialReadings(ctx, user) {
   await ctx.reply(`✅ Начальные показания установлены:\nЭлектричество: ${elec}\nВода: ${water}\nГаз: ${gas}`);
 }
 
-// /contact_superadmin
-async function contactSuperAdmin(ctx, user) {
-  session.setSession(user.user_id, { flow: 'contact_superadmin' });
-  await ctx.reply('Введите текст сообщения для суперадминистратора:', keyboards.removeKeyboard());
-}
-
 // Handle payment input
 async function handlePaymentInput(ctx, user) {
   const sess = session.getSession(user.user_id);
@@ -603,20 +611,6 @@ async function handlePaymentInput(ctx, user) {
       );
     } catch (e) { /* tenant may have blocked bot or left chat */ }
   }
-}
-
-// Handle contact_superadmin input
-async function handleContactInput(ctx, user, bot) {
-  const text = ctx.message.text;
-  const state = await queries.getBotState();
-  if (state?.super_admin_user_id) {
-    await bot.telegram.sendMessage(
-      state.super_admin_user_id,
-      `📨 Сообщение от арендодателя ${user.user_id}:\n\n${text}`
-    );
-  }
-  session.clearSession(user.user_id);
-  await ctx.reply('✅ Сообщение отправлено суперадминистратору.', keyboards.adminMainMenu());
 }
 
 // Handle tariff change via menu buttons
@@ -849,9 +843,7 @@ module.exports = {
   setRent,
   pay,
   setInitialReadings,
-  contactSuperAdmin,
   handlePaymentInput,
-  handleContactInput,
   handleTariffChange,
   handleTariffInput,
   handleTariffDate,

@@ -376,6 +376,39 @@ function isSubscriptionActive(sub) {
   return new Date(sub.end_date) >= new Date();
 }
 
+// Detect trial subscription: max_flats = 1 and end_date is ~14 days from created_at
+function isTrialSubscription(sub) {
+  if (!sub || !sub.created_at || !sub.end_date) return false;
+  if (sub.max_flats !== 1) return false;
+  const created = new Date(sub.created_at);
+  const end = new Date(sub.end_date);
+  const diffDays = Math.round((end - created) / (1000 * 60 * 60 * 24));
+  return diffDays >= 13 && diffDays <= 15;
+}
+
+// Count total active tenants across all flats owned by an admin
+async function countTenantsForAdmin(adminUserId) {
+  const row = await queryOne(
+    `SELECT COUNT(*) AS count FROM users u
+     JOIN flats f ON u.flat_id = f.id
+     WHERE f.admin_user_id = ? AND u.role = 'tenant' AND u.is_active = 1`,
+    [adminUserId]
+  );
+  return row ? row.count : 0;
+}
+
+// Get all active tenants for flats belonging to an admin (with flat info)
+async function getActiveTenantsForAdmin(adminUserId) {
+  return queryAll(
+    `SELECT u.user_id, u.flat_id, f.name AS flat_name
+     FROM users u
+     JOIN flats f ON u.flat_id = f.id
+     WHERE f.admin_user_id = ? AND u.role = 'tenant' AND u.is_active = 1
+     ORDER BY u.user_id`,
+    [adminUserId]
+  );
+}
+
 // ---- Invite Tokens ----
 async function createInviteToken(role, flatId = null, subEndDate = null, subMaxFlats = null) {
   const token = generateToken();
@@ -498,6 +531,9 @@ module.exports = {
   updateSubscription,
   listAllSubscriptions,
   isSubscriptionActive,
+  isTrialSubscription,
+  countTenantsForAdmin,
+  getActiveTenantsForAdmin,
   createInviteToken,
   getInviteToken,
   markTokenUsed,
