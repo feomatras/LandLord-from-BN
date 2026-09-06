@@ -48,7 +48,9 @@ async function tenantHelp(ctx) {
 
 📊 /stats — показать статистику по квартире (тарифы, показания, баланс)
 
-🗑 /delete_me — деактивировать свой аккаунт и покинуть систему
+📨 /support — связь с поддержкой (можно прикрепить фото/документ)
+
+🗑 /delete_me — удалить свой аккаунт и покинуть систему
 
 ❌ /cancel — отменить любое незавершённое действие
 
@@ -87,6 +89,14 @@ async function submitReadings(ctx, user, bot) {
   }
   const flat = await queries.getFlat(flatId);
   if (!flat) return ctx.reply('Квартира не найдена.');
+
+  // Block submission if landlord's subscription has expired
+  if (flat.admin_user_id) {
+    const sub = await queries.getSubscription(flat.admin_user_id);
+    if (sub && !queries.isSubscriptionActive(sub)) {
+      return ctx.reply('Передача показаний недоступна — подписка арендодателя истекла. Обратитесь к арендодателю.');
+    }
+  }
 
   if (isLandlord) {
     const tenants = await queries.getTenantsForFlat(flatId);
@@ -412,18 +422,15 @@ async function tenantStats(ctx, user) {
   await ctx.reply(msg);
 }
 
-// /delete_me — tenant self-deactivation with confirmation
+// /delete_me — tenant self-deletion with confirmation
 async function deleteMe(ctx, user, bot) {
-  if (!user.is_active) {
-    return ctx.reply('Ваш аккаунт уже деактивирован.');
-  }
   const flat = await queries.getFlat(user.flat_id);
   session.setSession(user.user_id, { flow: 'delete_me', flatId: user.flat_id, flatAdminId: flat?.admin_user_id });
   await ctx.reply(
-    '⚠️ Вы уверены, что хотите деактивировать свой аккаунт?\n\n' +
-    'Ваши данные (показания, транзакции) будут сохранены для истории.\n' +
-    'После деактивации вы не сможете передавать показания и получать уведомления.\n' +
-    'Для восстановления обратитесь к арендодателю.',
+    '⚠️ Вы уверены, что хотите удалить свой аккаунт?\n\n' +
+    'Ваши данные (показания, транзакции) будут сохранены для истории у арендодателя.\n' +
+    'После удаления вы сможете заново зарегистрироваться в боте по новой пригласительной ссылке ' +
+    '(например, как арендодатель или арендатор другой квартиры).',
     keyboards.deleteMeConfirmKeyboard()
   );
 }
@@ -435,20 +442,21 @@ async function confirmDeleteMe(ctx, user, bot) {
   const flatAdminId = sess.flatAdminId;
   const flatId = sess.flatId;
 
-  await queries.deactivateTenantAndClearFlat(user.user_id);
+  await queries.deleteUser(user.user_id);
 
   session.clearSession(user.user_id);
-  await ctx.answerCbQuery('Аккаунт деактивирован');
+  await ctx.answerCbQuery('Аккаунт удалён');
   await ctx.editMessageText(
-    '✅ Ваш аккаунт деактивирован. Данные сохранены для истории. ' +
-    'Если захотите восстановиться, обратитесь к арендодателю.'
+    '✅ Ваш аккаунт удалён. ' +
+    'Если захотите зарегистрироваться заново (например, как арендодатель), ' +
+    'используйте соответствующую пригласительную ссылку или команду /start.'
   );
 
   if (bot && flatAdminId) {
     try {
       await bot.telegram.sendMessage(
         flatAdminId,
-        `👤 Арендатор ${user.user_id} покинул систему и деактивирован.`
+        `👤 Арендатор ${user.user_id} покинул систему и удалён из базы данных.`
       );
     } catch (e) { /* landlord may have blocked bot */ }
   }

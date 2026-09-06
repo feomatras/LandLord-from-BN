@@ -27,6 +27,11 @@ function setupScheduler(bot) {
     await remindAboutPayment(bot);
   }, { timezone: 'Europe/Moscow' });
 
+  // Daily check: trial expiry notifications + expired subscriptions cleanup
+  cron.schedule('0 9 * * *', async () => {
+    await notifyTrialExpiry(bot);
+  }, { timezone: 'Europe/Moscow' });
+
   // Daily check for expired subscriptions data deletion
   cron.schedule('0 3 * * *', async () => {
     await cleanupExpiredSubscriptions(bot);
@@ -150,6 +155,41 @@ async function remindAboutPayment(bot) {
     try {
       await bot.telegram.sendMessage(flat.admin_user_id, msg, keyboards.payKeyboard());
     } catch (e) { /* ignore */ }
+  }
+}
+
+async function notifyTrialExpiry(bot) {
+  const subs = await queries.listAllSubscriptions();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  for (const sub of subs) {
+    if (!queries.isTrialSubscription(sub)) continue;
+    const endDate = new Date(sub.end_date);
+    endDate.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((endDate - today) / (1000 * 60 * 60 * 24));
+
+    if (diffDays === 3) {
+      try {
+        await bot.telegram.sendMessage(
+          sub.admin_user_id,
+          `⏳ Ваш пробный период заканчивается через 3 дня.\n` +
+          `Чтобы продолжить пользоваться ботом, оформите подписку.\n` +
+          `Используйте команду /support, чтобы связаться с администратором.`
+        );
+      } catch (e) { /* ignore */ }
+    }
+
+    if (diffDays === 0) {
+      try {
+        await bot.telegram.sendMessage(
+          sub.admin_user_id,
+          `⚠️ Ваш пробный период завершён.\n` +
+          `Доступны только просмотр статистики и связь с поддержкой (/support).\n` +
+          `Для оформления подписки используйте /support.`
+        );
+      } catch (e) { /* ignore */ }
+    }
   }
 }
 

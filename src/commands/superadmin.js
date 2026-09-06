@@ -97,6 +97,7 @@ async function superAdminHelp(ctx) {
 
 📊 /globalstats — общая статистика
 💾 /backup — резервная копия
+📨 /support — входящие обращения пользователей
 ❌ /cancel — отменить любое незавершённое действие`;
   await ctx.reply(msg);
 }
