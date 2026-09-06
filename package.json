@@ -1,18 +1,33 @@
-{
-  "name": "rental-telegram-bot",
-  "version": "1.0.0",
-  "description": "Telegram bot for rental property management: meter readings, utility billing, rent tracking, and tenant balances",
-  "main": "index.js",
-  "type": "commonjs",
-  "scripts": {
-    "start": "node index.js",
-    "build": "node -c index.js && echo \"Build OK\"",
-    "backup": "node scripts/backup.js"
-  },
-  "dependencies": {
-    "better-sqlite3": "^11.3.0",
-    "dotenv": "^16.4.5",
-    "node-cron": "^3.0.3",
-    "telegraf": "^4.16.3"
-  }
+// Session/conversation state manager for multi-step flows
+// Stores per-user conversation state in memory (resets on restart, which is acceptable for MVP)
+
+const sessions = new Map();
+
+function getSession(userId) {
+  return sessions.get(userId) || null;
 }
+
+function setSession(userId, state) {
+  sessions.set(userId, { ...state, startedAt: Date.now() });
+}
+
+function clearSession(userId) {
+  sessions.delete(userId);
+}
+
+function updateSession(userId, partial) {
+  const existing = sessions.get(userId) || {};
+  sessions.set(userId, { ...existing, ...partial });
+}
+
+function isActive(userId) {
+  return sessions.has(userId);
+}
+
+module.exports = {
+  getSession,
+  setSession,
+  clearSession,
+  updateSession,
+  isActive,
+};

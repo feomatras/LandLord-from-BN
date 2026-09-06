@@ -1,1 +1,2 @@
-# LandLord-from-BN
+node_modules/
+.env
