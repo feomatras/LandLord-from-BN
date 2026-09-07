@@ -42,7 +42,9 @@ async function superAdminStart(ctx, user) {
   msg += `/summary — сводка по квартирам\n`;
   msg += `/invite_tenant — пригласить арендатора\n`;
   msg += `/listusers — список пользователей\n`;
-  msg += `/removeuser <ID> — удалить пользователя\n`;
+  msg += `/removeuser <ID> — удалить пользователя (арендатора или арендодателя)\n`;
+  msg += `/toggle_user <ID> — активировать/деактивировать учётную запись\n`;
+  msg += `/reply <ID> <текст> — ответить пользователю через поддержку\n`;
   msg += `/toggle_rent — включить/выключить аренду\n`;
   msg += `/set_rent <сумма> — установить аренду\n`;
   msg += `/pay — внести платёж\n`;
@@ -79,10 +81,14 @@ async function superAdminHelp(ctx) {
 • /summary — сводка по квартирам и общая статистика
 • /history — история начислений и платежей
 
-👥 Арендаторы:
+👥 Арендаторы и пользователи:
 • /invite_tenant — ссылка-приглашение
 • /listusers — список пользователей
-• /removeuser <TelegramID> — удалить пользователя
+• /removeuser <TelegramID> — удалить пользователя (арендатора или арендодателя вместе с квартирами)
+• /toggle_user <TelegramID> — активировать/деактивировать учётную запись
+
+📨 Поддержка:
+• /reply <TelegramID> <текст> — ответить пользователю через бота
 
 💰 Платежи:
 • /pay — внести платёж
@@ -174,7 +180,63 @@ async function inviteTenant(ctx, user) {
 }
 
 async function removeUser(ctx, user) {
-  return adminCmd.removeUser(ctx, user);
+  const targetId = parseInt(ctx.message.text.replace(/^\/removeuser\s*/i, '').trim());
+  if (!targetId) return ctx.reply('Укажите Telegram ID: /removeuser <TelegramID>');
+  const targetUser = await queries.getUser(targetId);
+  if (!targetUser) return ctx.reply('Пользователь не найден.');
+  if (targetUser.role === 'super_admin') return ctx.reply('Нельзя удалить суперадминистратора.');
+
+  if (targetUser.role === 'admin') {
+    await queries.deleteUserAndData(targetId);
+    await ctx.reply(`✅ Арендодатель ${targetId} и все его квартиры удалены из базы данных.`);
+  } else {
+    await queries.deleteUser(targetId);
+    await ctx.reply(`✅ Арендатор ${targetId} удалён из базы данных. Показания и транзакции сохранены в истории квартиры.`);
+  }
+}
+
+async function toggleUser(ctx, user) {
+  const targetId = parseInt(ctx.message.text.replace(/^\/toggle_user\s*/i, '').trim());
+  if (!targetId) return ctx.reply('Укажите Telegram ID: /toggle_user <TelegramID>');
+  const targetUser = await queries.getUser(targetId);
+  if (!targetUser) return ctx.reply('Пользователь не найден.');
+  if (targetUser.role === 'super_admin') return ctx.reply('Нельзя изменить статус суперадминистратора.');
+
+  const updated = await queries.toggleUserActive(targetId);
+  const status = updated.is_active ? 'активна' : 'неактивна';
+  await ctx.reply(`✅ Учётная запись ${targetId} теперь ${status}.`);
+  try {
+    await ctx.telegram.sendMessage(
+      targetId,
+      updated.is_active
+        ? '✅ Ваша учётная запись активирована. Все функции снова доступны.'
+        : '⚠️ Ваша учётная запись деактивирована администратором. Доступ к функциям бота приостановлен.'
+    );
+  } catch (e) { /* ignore */ }
+}
+
+async function replyToUser(ctx, user) {
+  const text = ctx.message.text.replace(/^\/reply\s*/i, '');
+  const match = text.match(/^(\d+)\s+([\s\S]+)$/);
+  if (!match) {
+    return ctx.reply('Использование: /reply <TelegramID> <текст сообщения>');
+  }
+  const targetId = parseInt(match[1]);
+  const replyText = match[2].trim();
+  if (!replyText) return ctx.reply('Текст сообщения не может быть пустым.');
+
+  const targetUser = await queries.getUser(targetId);
+  if (!targetUser) return ctx.reply('Пользователь не найден.');
+
+  try {
+    await ctx.telegram.sendMessage(
+      targetId,
+      `📨 Ответ поддержки:\n\n${replyText}`
+    );
+    await ctx.reply(`✅ Ответ отправлен пользователю ${targetId}.`);
+  } catch (e) {
+    await ctx.reply('Не удалось отправить ответ. Возможно, пользователь заблокировал бота.');
+  }
 }
 
 async function listUsers(ctx, user) {
@@ -412,6 +474,8 @@ module.exports = {
   summary,
   inviteTenant,
   removeUser,
+  toggleUser,
+  replyToUser,
   listUsers,
   toggleRent,
   setRent,

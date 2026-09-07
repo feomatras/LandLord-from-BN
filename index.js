@@ -361,6 +361,18 @@ bot.command('backup', async (ctx) => {
   await ctx.reply('Резервное копирование выполняется автоматически каждый день в 2:00. Для ручного запуска используйте скрипт scripts/backup.js на сервере.');
 });
 
+bot.command('toggle_user', async (ctx) => {
+  const user = await getCtxUser(ctx);
+  if (!user || user.role !== 'super_admin') return ctx.reply('По всем вопросам обращаться @Cheatgtp');
+  await superCmd.toggleUser(ctx, user);
+});
+
+bot.command('reply', async (ctx) => {
+  const user = await getCtxUser(ctx);
+  if (!user || user.role !== 'super_admin') return ctx.reply('По всем вопросам обращаться @Cheatgtp');
+  await superCmd.replyToUser(ctx, user);
+});
+
 // ---- Callback query handlers ----
 bot.action('confirm_reading', async (ctx) => {
   const user = await getCtxUser(ctx);

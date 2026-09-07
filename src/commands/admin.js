@@ -45,7 +45,7 @@ async function adminStart(ctx, user) {
     msg += `/summary — сводка по квартирам\n`;
     msg += `/invite_tenant — пригласить арендатора\n`;
     msg += `/listusers — список пользователей\n`;
-    msg += `/removeuser <ID> — удалить пользователя\n`;
+    msg += `/removeuser <ID> — удалить арендатора из базы данных\n`;
     msg += `/subscribe — информация о подписке\n`;
     msg += `/toggle_rent — включить/выключить аренду\n`;
     msg += `/set_rent <сумма> — установить аренду\n`;
@@ -82,7 +82,7 @@ async function adminHelp(ctx) {
 👥 Арендаторы:
 • /invite_tenant — ссылка-приглашение (без срока доступа)
 • /listusers — список пользователей
-• /removeuser <TelegramID> — удалить пользователя
+• /removeuser <TelegramID> — удалить арендатора из базы данных
 
 💰 Платежи:
 • /pay или кнопка «Внести платеж» — внести платёж
@@ -481,8 +481,8 @@ async function removeUser(ctx, user) {
         return ctx.reply('Этот арендатор не принадлежит вашим квартирам.');
       }
     }
-    await queries.deactivateUser(targetId);
-    await ctx.reply(`✅ Пользователь ${targetId} деактивирован. Записи сохранены для истории.`);
+    await queries.deleteUser(targetId);
+    await ctx.reply(`✅ Арендатор ${targetId} удалён из базы данных. Показания и транзакции сохранены в истории квартиры.`);
   } else {
     await ctx.reply('Можно удалять только арендаторов.');
   }

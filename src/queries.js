@@ -23,6 +23,14 @@ async function deleteUser(userId) {
   await query('DELETE FROM users WHERE user_id = ?', [userId]);
 }
 
+async function toggleUserActive(userId) {
+  const user = await getUser(userId);
+  if (!user) return null;
+  const newActive = user.is_active ? 0 : 1;
+  await query('UPDATE users SET is_active = ? WHERE user_id = ?', [newActive, userId]);
+  return { ...user, is_active: newActive };
+}
+
 async function setSelectedFlat(userId, flatId) {
   await query('UPDATE users SET selected_flat_id = ? WHERE user_id = ?', [flatId, userId]);
 }
@@ -485,6 +493,7 @@ module.exports = {
   createUser,
   deactivateUser,
   deleteUser,
+  toggleUserActive,
   setSelectedFlat,
   listUsersForAdmin,
   listAllUsers,
