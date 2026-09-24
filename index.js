@@ -555,6 +555,7 @@ bot.on('text', async (ctx) => {
   }
 
   if (user.role === 'super_admin') {
+    if (text === 'Ввести показания') return tenantCmd.submitReadings(ctx, user, bot);
     if (text === 'Настройка аренды') {
       const flat = await queries.getFlat(user.selected_flat_id);
       if (!flat) return ctx.reply('Выберите квартиру.');
@@ -574,6 +575,7 @@ bot.on('text', async (ctx) => {
   }
 
   if (user.role === 'admin' && !(await isExpiredForAdmin(user))) {
+    if (text === 'Ввести показания') return tenantCmd.submitReadings(ctx, user, bot);
     if (text === 'Настройка аренды') {
       const flat = await queries.getFlat(user.selected_flat_id);
       if (!flat) return ctx.reply('Выберите квартиру.');
