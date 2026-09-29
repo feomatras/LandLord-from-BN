@@ -103,8 +103,13 @@ async function setRent(flatId, enabled, amount = 0) {
   );
 }
 
+// Balance is rounded to kopecks on every change to avoid float drift.
+function updateFlatBalanceSync(flatId, delta) {
+  db.prepare('UPDATE flats SET balance = ROUND(balance + ?, 2) WHERE id = ?').run(delta, flatId);
+}
+
 async function updateFlatBalance(flatId, delta) {
-  await query('UPDATE flats SET balance = balance + ? WHERE id = ?', [delta, flatId]);
+  updateFlatBalanceSync(flatId, delta);
 }
 
 async function setFlatBalance(flatId, balance) {
@@ -291,46 +296,87 @@ async function getAccrualForMonth(flatId, mk) {
 }
 
 async function createAccrual(flatId, mk, amount, description, tariffsSnapshot, createdBy) {
-  const txn = queryOne(
-    `INSERT INTO transactions (flat_id, month, amount, type, description, tariffs_snapshot, created_by)
-     VALUES (?, ?, ?, 'accrual', ?, ?, ?) RETURNING *`,
-    [flatId, mk, amount, description, JSON.stringify(tariffsSnapshot), createdBy]
-  );
-  await updateFlatBalance(flatId, amount);
-  return txn;
+  // Insert + balance update in one DB transaction (all or nothing)
+  return db.transaction(() => {
+    const txn = queryOne(
+      `INSERT INTO transactions (flat_id, month, amount, type, description, tariffs_snapshot, created_by)
+       VALUES (?, ?, ?, 'accrual', ?, ?, ?) RETURNING *`,
+      [flatId, mk, amount, description, JSON.stringify(tariffsSnapshot), createdBy]
+    );
+    updateFlatBalanceSync(flatId, amount);
+    return txn;
+  })();
 }
 
 async function deleteAccrual(flatId, mk) {
-  // Get the old amount so we can reverse the balance
-  const old = await getAccrualForMonth(flatId, mk);
-  if (old) {
-    await updateFlatBalance(flatId, -old.amount);
-  }
-  await query(
-    `DELETE FROM transactions WHERE flat_id = ? AND month = ? AND type = 'accrual'`,
-    [flatId, mk]
+  db.transaction(() => {
+    // Reverse ALL accruals of the month (there may be more than one)
+    const rows = queryAll(
+      `SELECT amount FROM transactions WHERE flat_id = ? AND month = ? AND type = 'accrual'`,
+      [flatId, mk]
+    );
+    const total = rows.reduce((s, r) => s + Number(r.amount || 0), 0);
+    if (total) updateFlatBalanceSync(flatId, -total);
+    query(`DELETE FROM transactions WHERE flat_id = ? AND month = ? AND type = 'accrual'`, [flatId, mk]);
+  })();
+}
+
+// amount > 0 — received payment (debt decreases)
+// amount < 0 — correction (debt increases)
+async function createPayment(flatId, mk, amount, createdBy) {
+  const n = Math.round(Number(amount) * 100) / 100;
+  if (!n) throw new Error('Payment amount must be non-zero');
+  const payAmount = -n;
+  const description = n > 0 ? 'Платёж от арендатора' : 'Корректировка: увеличение долга';
+  return db.transaction(() => {
+    const txn = queryOne(
+      `INSERT INTO transactions (flat_id, month, amount, type, description, created_by)
+       VALUES (?, ?, ?, 'payment', ?, ?) RETURNING *`,
+      [flatId, mk, payAmount, description, createdBy]
+    );
+    updateFlatBalanceSync(flatId, payAmount);
+    return txn;
+  })();
+}
+
+async function getTransactionById(id) {
+  return queryOne('SELECT * FROM transactions WHERE id = ?', [id]);
+}
+
+async function countTransactions(flatId) {
+  const r = queryOne('SELECT COUNT(*) AS c FROM transactions WHERE flat_id = ?', [flatId]);
+  return r ? r.c : 0;
+}
+
+async function getTransactionsPage(flatId, limit, offset) {
+  return queryAll(
+    'SELECT * FROM transactions WHERE flat_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?',
+    [flatId, limit, offset]
   );
 }
 
-async function createPayment(flatId, mk, amount, createdBy) {
-  const payAmount = -Math.abs(Number(amount));
-  const txn = queryOne(
-    `INSERT INTO transactions (flat_id, month, amount, type, description, created_by)
-     VALUES (?, ?, ?, 'payment', 'Платёж от арендатора', ?) RETURNING *`,
-    [flatId, mk, payAmount, createdBy]
-  );
-  await updateFlatBalance(flatId, payAmount);
-  return txn;
+// Deletes a payment row and reverses its effect on the balance.
+// Returns the deleted row or null.
+async function deletePayment(id) {
+  return db.transaction(() => {
+    const txn = queryOne(`SELECT * FROM transactions WHERE id = ? AND type = 'payment'`, [id]);
+    if (!txn) return null;
+    query('DELETE FROM transactions WHERE id = ?', [id]);
+    updateFlatBalanceSync(txn.flat_id, -Number(txn.amount));
+    return txn;
+  })();
 }
 
 async function createInitialBalanceTransaction(flatId, amount, createdBy) {
-  const txn = queryOne(
-    `INSERT INTO transactions (flat_id, month, amount, type, description, created_by)
-     VALUES (?, ?, ?, 'initial', 'Начальный баланс', ?) RETURNING *`,
-    [flatId, monthKey(), amount, createdBy]
-  );
-  await updateFlatBalance(flatId, amount);
-  return txn;
+  return db.transaction(() => {
+    const txn = queryOne(
+      `INSERT INTO transactions (flat_id, month, amount, type, description, created_by)
+       VALUES (?, ?, ?, 'initial', 'Начальный баланс', ?) RETURNING *`,
+      [flatId, monthKey(), amount, createdBy]
+    );
+    updateFlatBalanceSync(flatId, amount);
+    return txn;
+  })();
 }
 
 async function getBalance(flatId) {
@@ -524,6 +570,10 @@ module.exports = {
   createAccrual,
   deleteAccrual,
   createPayment,
+  getTransactionById,
+  countTransactions,
+  getTransactionsPage,
+  deletePayment,
   createInitialBalanceTransaction,
   getBalance,
   getSubscription,

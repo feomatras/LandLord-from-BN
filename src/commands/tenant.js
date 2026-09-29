@@ -197,7 +197,7 @@ async function askForReading(ctx, user, bot) {
   msg += `${meterNames[meter]} (тариф > 0)\n`;
   msg += `Предыдущее показание: ${prev} ${units[meter]}\n\n`;
   msg += `Введите текущее показание:`;
-  await ctx.reply(msg, keyboards.removeKeyboard());
+  await ctx.reply(msg, keyboards.cancelKeyboard());
 }
 
 // Handle meter reading text input
@@ -331,7 +331,7 @@ async function finalizeReadings(ctx, user, bot) {
     const tariff = await queries.getTariffForMonth(sess.flatId, mk);
     if (!tariff) {
       session.clearSession(user.user_id);
-      return ctx.reply('Тариф не найден для текущего месяца. Обратитесь к арендодателю.', keyboards.removeKeyboard());
+      return ctx.reply('Тариф не найден для текущего месяца. Обратитесь к арендодателю.', keyboards.cancelKeyboard());
     }
     const result = calculateAccrual(readings, prevReadings, tariff, flat);
     breakdown = result.breakdown;

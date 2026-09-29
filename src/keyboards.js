@@ -1,25 +1,52 @@
 // Telegram keyboard builders
 const { Markup } = require('telegraf');
 
+// New button labels are mapped to the legacy labels in BUTTON_ALIASES,
+// so users with an old cached keyboard keep working too.
 function adminMainMenu() {
   return Markup.keyboard([
-    ['Ввести показания', 'Внести платеж'],
+    ['💰 Платёж', '📥 Показания'],
+    ['📜 История', '🏠 Квартиры'],
+    ['⚙️ Тарифы', '🏷 Аренда'],
+    ['🆘 Поддержка', '☰ Главное меню'],
+  ]).resize();
+}
+
+function tariffsMenu() {
+  return Markup.keyboard([
     ['Изменить тариф Воды', 'Изменить тариф Электричества'],
     ['Изменить тариф Газа', 'Изменить тариф ТКО'],
     ['Изменить тариф УК', 'Изменить Капремонт'],
-    ['Настройка аренды'],
-    ['Мои квартиры', 'История платежей'],
-    ['Поддержка', 'Главное меню'],
+    ['⬅️ Назад'],
   ]).resize();
 }
 
 function tenantMainMenu() {
   return Markup.keyboard([
-    ['Передать показания', 'Баланс'],
-    ['Статистика', 'Поддержка'],
-    ['Главное меню'],
+    ['📥 Передать показания', '💳 Баланс'],
+    ['📊 Статистика', '🆘 Поддержка'],
+    ['☰ Главное меню'],
   ]).resize();
 }
+
+function cancelKeyboard() {
+  return Markup.keyboard([['❌ Отмена']]).resize();
+}
+
+const BUTTON_ALIASES = {
+  '💰 Платёж': 'Внести платеж',
+  '📥 Показания': 'Ввести показания',
+  '📜 История': 'История платежей',
+  '🏠 Квартиры': 'Мои квартиры',
+  '🏷 Аренда': 'Настройка аренды',
+  '🆘 Поддержка': 'Поддержка',
+  '☰ Главное меню': 'Главное меню',
+  '⬅️ Назад': 'Главное меню',
+  '📥 Передать показания': 'Передать показания',
+  '💳 Баланс': 'Баланс',
+  '📊 Статистика': 'Статистика',
+  '❌ Отмена': 'отмена',
+};
 
 function trialStartKeyboard() {
   return Markup.inlineKeyboard([
@@ -70,6 +97,9 @@ function removeKeyboard() {
 }
 
 module.exports = {
+  tariffsMenu,
+  cancelKeyboard,
+  BUTTON_ALIASES,
   adminMainMenu,
   tenantMainMenu,
   trialStartKeyboard,

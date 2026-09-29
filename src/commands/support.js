@@ -13,7 +13,7 @@ async function startSupport(ctx, user) {
   session.setSession(user.user_id, { flow: 'support' });
   await ctx.reply(
     'Опишите вашу проблему или вопрос. Вы можете прикрепить фото или документ (необязательно).',
-    keyboards.removeKeyboard()
+    keyboards.cancelKeyboard()
   );
 }
 

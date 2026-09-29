@@ -47,7 +47,7 @@ async function superAdminStart(ctx, user) {
   msg += `/reply <ID> <текст> — ответить пользователю через поддержку\n`;
   msg += `/toggle_rent — включить/выключить аренду\n`;
   msg += `/set_rent <сумма> — установить аренду\n`;
-  msg += `/pay — внести платёж\n`;
+  msg += `/pay — внести платёж (отрицательная сумма увеличивает долг)\n`;
   msg += `/submit или кнопка «Ввести показания» — ввести показания (если арендатор не в боте)\n`;
   msg += `/set_initial_readings <эл> <вода> <газ> — начальные показания\n\n`;
   msg += `Управление арендодателями:\n`;
@@ -93,7 +93,8 @@ async function superAdminHelp(ctx) {
 • /reply <TelegramID> <текст> — ответить пользователю через бота
 
 💰 Платежи:
-• /pay — внести платёж
+• /pay или «💰 Платёж» — внести платёж (сумма со знаком минус увеличивает долг)
+• «📜 История» — кнопка 🗑 удаляет платёж по вашей квартире
 • /toggle_rent — включить/выключить аренду
 • /set_rent <сумма> — установить сумму аренды
 
@@ -265,7 +266,7 @@ async function setInitialReadings(ctx, user) {
 
 async function addAdmin(ctx, user) {
   session.setSession(user.user_id, { flow: 'add_admin', step: 'user_id' });
-  await ctx.reply('Введите Telegram ID нового арендодателя:', keyboards.removeKeyboard());
+  await ctx.reply('Введите Telegram ID нового арендодателя:', keyboards.cancelKeyboard());
 }
 
 // /invite_admin — multi-step: optional end date and max flats
@@ -274,7 +275,7 @@ async function inviteAdmin(ctx, user) {
   await ctx.reply(
     'Создание приглашения для арендодателя.\n' +
     'Введите дату окончания подписки (ДД.ММ.ГГГГ) или «пропустить»:',
-    keyboards.removeKeyboard()
+    keyboards.cancelKeyboard()
   );
 }
 

@@ -1,16 +1,40 @@
 // Utility functions for formatting, dates, and validation
 
+function groupThousands(intStr) {
+  return intStr.replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+}
+
 function formatMoney(amount) {
   const n = Number(amount) || 0;
-  const rub = Math.floor(Math.abs(n));
-  const kop = Math.round((Math.abs(n) - rub) * 100);
-  const sign = n < 0 ? '-' : '';
-  return `${sign}${rub} руб. ${String(kop).padStart(2, '0')} коп.`;
+  // work in kopecks to avoid "100 коп." rounding bug
+  const totalKop = Math.round(Math.abs(n) * 100);
+  const rub = Math.floor(totalKop / 100);
+  const kop = totalKop % 100;
+  const sign = n < 0 && totalKop > 0 ? '-' : '';
+  return `${sign}${groupThousands(String(rub))} руб. ${String(kop).padStart(2, '0')} коп.`;
 }
 
 function formatMoneyShort(amount) {
   const n = Number(amount) || 0;
-  return `${n.toFixed(2)} руб.`;
+  const [i, d] = Math.abs(n).toFixed(2).split('.');
+  const sign = n < 0 && Number(`${i}.${d}`) > 0 ? '-' : '';
+  return `${sign}${groupThousands(i)}.${d} руб.`;
+}
+
+// Human-readable balance status with emoji marker
+function balanceStatus(balance) {
+  const b = Math.round((Number(balance) || 0) * 100) / 100;
+  if (b > 0) return `🔴 Долг: ${formatMoney(b)}`;
+  if (b < 0) return `🟢 Переплата: ${formatMoney(-b)}`;
+  return '⚪️ Баланс нулевой';
+}
+
+// SQLite CURRENT_TIMESTAMP is UTC "YYYY-MM-DD HH:MM:SS" without zone
+function parseDbDate(str) {
+  if (!str) return null;
+  const s = String(str);
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) return new Date(s.replace(' ', 'T') + 'Z');
+  return new Date(s);
 }
 
 function monthKey(date = new Date()) {
@@ -120,6 +144,8 @@ function lastDayOfMonth(year, month) {
 }
 
 module.exports = {
+  balanceStatus,
+  parseDbDate,
   formatMoney,
   formatMoneyShort,
   monthKey,

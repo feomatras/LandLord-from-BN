@@ -418,6 +418,49 @@ bot.action(/select_flat_(\d+)/, async (ctx) => {
   await ctx.reply(`Активная квартира: ${flat.id}. ${flat.name}\nТекущий баланс: ${formatMoney(balance)}`, keyboards.adminMainMenu());
 });
 
+// ---- Payments: confirmation, history pages, deletion ----
+// Returns the admin/super_admin user if allowed to act, otherwise answers the callback.
+async function getActiveAdmin(ctx) {
+  const user = await getCtxUser(ctx);
+  if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) {
+    await ctx.answerCbQuery('Нет доступа');
+    return null;
+  }
+  if (await isExpiredForAdmin(user)) {
+    await ctx.answerCbQuery('Подписка истекла. Используйте /support.', { show_alert: true });
+    return null;
+  }
+  return user;
+}
+
+bot.action('pay_ok', async (ctx) => {
+  const user = await getActiveAdmin(ctx);
+  if (user) await adminCmd.confirmPayment(ctx, user);
+});
+
+bot.action('pay_cancel', async (ctx) => {
+  const user = await getCtxUser(ctx);
+  if (!user) return ctx.answerCbQuery();
+  await adminCmd.cancelPayment(ctx, user);
+});
+
+bot.action(/^hist_page_(\d+)$/, async (ctx) => {
+  const user = await getActiveAdmin(ctx);
+  if (!user) return;
+  await ctx.answerCbQuery();
+  await adminCmd.history(ctx, user, parseInt(ctx.match[1], 10), true);
+});
+
+bot.action(/^del_tx_ok_(\d+)$/, async (ctx) => {
+  const user = await getActiveAdmin(ctx);
+  if (user) await adminCmd.deletePaymentConfirmed(ctx, user, parseInt(ctx.match[1], 10));
+});
+
+bot.action(/^del_tx_(\d+)$/, async (ctx) => {
+  const user = await getActiveAdmin(ctx);
+  if (user) await adminCmd.askDeletePayment(ctx, user, parseInt(ctx.match[1], 10));
+});
+
 // Delete flat confirmation callbacks
 bot.action(/confirm_delete_flat_(\d+)/, async (ctx) => {
   const user = await getCtxUser(ctx);
@@ -450,7 +493,7 @@ bot.action('start_trial', async (ctx) => {
   await queries.createUser(userId, 'admin');
   await queries.createSubscription(userId, endDateStr, 1);
   await ctx.answerCbQuery('Пробный период активирован');
-  let msg = `✅ Пробный период активирован!\\nДействует до: ${endDateStr}\\nЛимит: 1 квартира, до 2 арендаторов.\\n\\n`;
+  let msg = `✅ Пробный период активирован!\nДействует до: ${endDateStr}\nЛимит: 1 квартира, до 2 арендаторов.\n\n`;
   msg += `Используйте /addflat для создания первой квартиры.`;
   await ctx.editMessageText(msg);
   await ctx.reply('Главное меню', keyboards.adminMainMenu());
@@ -476,7 +519,9 @@ const tariffButtons = {
 };
 
 bot.on('text', async (ctx) => {
-  const text = ctx.message.text.trim();
+  const rawText = ctx.message.text.trim();
+  // New emoji buttons → legacy labels (old cached keyboards keep working)
+  const text = keyboards.BUTTON_ALIASES[rawText] || rawText;
   const userId = ctx.from.id;
   const user = await getCtxUser(ctx);
 
@@ -536,6 +581,11 @@ bot.on('text', async (ctx) => {
     if (sess.flow === 'invite_admin' && user.role === 'super_admin') {
       return superCmd.handleInviteAdminInput(ctx, user, bot);
     }
+  }
+
+  // Tariffs submenu
+  if (text === '⚙️ Тарифы' && (user.role === 'super_admin' || (user.role === 'admin' && !(await isExpiredForAdmin(user))))) {
+    return ctx.reply('Выберите тариф для изменения:', keyboards.tariffsMenu());
   }
 
   // Menu buttons
@@ -619,7 +669,9 @@ bot.on(['photo', 'document', 'video', 'voice', 'audio', 'sticker'], async (ctx) 
 
 // ---- Error handling ----
 bot.catch((err, ctx) => {
-  console.error('[Bot Error]', err.message);
+  // "message is not modified" happens when a user double-taps an inline button — harmless
+  if (err && /message is not modified/.test(err.message || '')) return;
+  console.error('[Bot Error]', err && err.stack ? err.stack : err);
   if (ctx && ctx.reply) {
     ctx.reply('Произошла ошибка. Попробуйте позже.').catch(() => {});
   }

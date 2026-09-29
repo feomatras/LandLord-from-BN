@@ -12,7 +12,10 @@ const {
   round2,
   formatDate,
   toFirstDayOfMonth,
+  balanceStatus,
+  parseDbDate,
 } = require('../utils');
+const { Markup } = require('telegraf');
 const keyboards = require('../keyboards');
 const session = require('../session');
 const config = require('../config');
@@ -49,7 +52,7 @@ async function adminStart(ctx, user) {
     msg += `/subscribe — информация о подписке\n`;
     msg += `/toggle_rent — включить/выключить аренду\n`;
     msg += `/set_rent <сумма> — установить аренду\n`;
-    msg += `/pay — внести платёж\n`;
+    msg += `/pay — внести платёж (отрицательная сумма увеличивает долг)\n`;
     msg += `/submit или кнопка «Ввести показания» — ввести показания (если арендатор не в боте)\n`;
     msg += `/set_initial_readings <эл> <вода> <газ> — начальные показания\n`;
     msg += `/cancel — отменить текущее действие\n`;
@@ -68,7 +71,7 @@ async function adminHelp(ctx) {
 • /flats — список всех квартир с балансами
 • /deleteflat <номер> — удалить квартиру (с подтверждением, при любом балансе)
 
-⚙️ Тарифы (через кнопки меню):
+⚙️ Тарифы (кнопка «⚙️ Тарифы»):
 • Изменение тарифа требует дату начала действия (ДД.ММ.ГГГГ)
 • Дата не может быть раньше первого числа текущего месяца
 • Если тариф = 0, показания по этому счётчику не запрашиваются
@@ -87,7 +90,12 @@ async function adminHelp(ctx) {
 • /removeuser <TelegramID> — удалить арендатора из базы данных
 
 💰 Платежи:
-• /pay или кнопка «Внести платеж» — внести платёж
+• /pay или кнопка «💰 Платёж» — внести платёж
+  – положительная сумма уменьшает долг (платёж получен)
+  – отрицательная сумма (например, -5000) увеличивает долг
+  – перед сохранением бот покажет баланс «до» и «после»
+• «📜 История» — история по 10 записей; кнопка 🗑 у платежа удаляет его
+  (баланс пересчитывается, арендатор получает уведомление)
 • /toggle_rent — включить/выключить учёт аренды
 • /set_rent <сумма> — установить сумму аренды
 
@@ -121,7 +129,7 @@ async function addFlat(ctx, user) {
     }
   }
   session.setSession(user.user_id, { flow: 'add_flat', step: 'name' });
-  await ctx.reply('Введите название квартиры:', keyboards.removeKeyboard());
+  await ctx.reply('Введите название квартиры:', keyboards.cancelKeyboard());
 }
 
 // Handle add_flat dialog steps
@@ -394,22 +402,53 @@ async function deleteFlatCmd(ctx, user) {
 }
 
 // /history
-async function history(ctx, user) {
+const HISTORY_PAGE_SIZE = 10;
+
+function txLabel(t) {
+  if (t.type === 'accrual') return '🧾 Начисление';
+  if (t.type === 'initial') return '📌 Нач. баланс';
+  if (t.type === 'payment') return Number(t.amount) > 0 ? '➕ Корректировка долга' : '💵 Платёж';
+  return t.type;
+}
+
+// Paged history with delete buttons for payments.
+// When called from an inline button (edit = true) the message is edited in place.
+async function history(ctx, user, page = 0, edit = false) {
   const flatId = user.selected_flat_id;
-  if (!flatId) return ctx.reply('Сначала выберите квартиру: /select_flat <номер>');
-  const txns = await queries.getTransactions(flatId);
-  if (!txns.length) return ctx.reply('История пуста.');
-  let msg = `История транзакций:\n\n`;
-  for (const t of txns.slice(0, 30)) {
-    const date = new Date(t.created_at).toLocaleDateString('ru-RU');
-    const sign = t.type === 'accrual' || t.type === 'initial' ? '+' : '-';
-    const typeLabel = t.type === 'accrual' ? 'Начисление' : t.type === 'initial' ? 'Нач.баланс' : 'Платёж';
-    msg += `${date} | ${typeLabel} | ${sign}${formatMoneyShort(Math.abs(t.amount))} | ${t.month}\n`;
-    if (t.description) msg += `   ${t.description.split('\n').join(' ')}\n`;
-  }
+  const send = (text, extra) => (edit ? ctx.editMessageText(text, extra) : ctx.reply(text, extra));
+  if (!flatId) return send('Сначала выберите квартиру: /select_flat или «🏠 Квартиры».');
+  const flat = await queries.getFlat(flatId);
+  if (!flat || flat.admin_user_id !== user.user_id) return send('Квартира не найдена.');
+
+  const total = await queries.countTransactions(flatId);
+  if (!total) return send(`🏠 ${flat.name}\nИстория пуста.`);
+  const pages = Math.ceil(total / HISTORY_PAGE_SIZE);
+  page = Math.min(Math.max(0, page), pages - 1);
+  const txns = await queries.getTransactionsPage(flatId, HISTORY_PAGE_SIZE, page * HISTORY_PAGE_SIZE);
+
+  let msg = `📜 История — ${flat.name}\nСтраница ${page + 1} из ${pages}\n\n`;
+  const delButtons = [];
+  txns.forEach((t, i) => {
+    const num = page * HISTORY_PAGE_SIZE + i + 1;
+    const d = parseDbDate(t.created_at);
+    const date = d && !isNaN(d) ? d.toLocaleDateString('ru-RU', { timeZone: config.TIMEZONE || 'Europe/Moscow' }) : '';
+    const sign = Number(t.amount) > 0 ? '+' : '−';
+    msg += `${num}. ${date} · ${txLabel(t)}\n    ${sign}${formatMoneyShort(Math.abs(t.amount))} · за ${t.month}\n`;
+    if (t.type === 'payment') {
+      delButtons.push(Markup.button.callback(`🗑 №${num}`, `del_tx_${t.id}`));
+    }
+  });
   const balance = await queries.getBalance(flatId);
-  msg += `\nТекущий баланс: ${formatMoney(balance)}`;
-  await ctx.reply(msg);
+  msg += `\n${balanceStatus(balance)}`;
+  if (delButtons.length) msg += `\n\nЧтобы удалить платёж, нажмите 🗑 с его номером.`;
+
+  const rows = [];
+  for (let i = 0; i < delButtons.length; i += 4) rows.push(delButtons.slice(i, i + 4));
+  const nav = [];
+  if (page > 0) nav.push(Markup.button.callback('◀️ Назад', `hist_page_${page - 1}`));
+  if (page < pages - 1) nav.push(Markup.button.callback('Вперёд ▶️', `hist_page_${page + 1}`));
+  if (nav.length) rows.push(nav);
+  return send(msg, rows.length ? Markup.inlineKeyboard(rows) : undefined);
 }
 
 // /stats
@@ -551,18 +590,17 @@ async function setRent(ctx, user) {
 // /pay
 async function pay(ctx, user) {
   const flatId = user.selected_flat_id;
-  if (!flatId) return ctx.reply('Сначала выберите квартиру.');
-  const balance = await queries.getBalance(flatId);
+  if (!flatId) return ctx.reply('Сначала выберите квартиру: «🏠 Квартиры».');
   const flat = await queries.getFlat(flatId);
-  session.setSession(user.user_id, {
-    flow: 'payment',
-    flatId,
-    flatName: flat.name,
-  });
-  let msg = `Квартира: ${flat.name}\nТекущий баланс: ${formatMoney(balance)}\n\n`;
-  msg += balance > 0 ? `Задолженность арендатора.\n` : balance < 0 ? `Переплата (предоплата).\n` : `Баланс нулевой.\n`;
-  msg += `Введите сумму полученного платежа (число):`;
-  await ctx.reply(msg, keyboards.removeKeyboard());
+  if (!flat || flat.admin_user_id !== user.user_id) return ctx.reply('Квартира не найдена.');
+  const balance = await queries.getBalance(flatId);
+  session.setSession(user.user_id, { flow: 'payment', step: 'amount', flatId, flatName: flat.name });
+  let msg = `💰 Внесение платежа\n🏠 ${flat.name}\n${balanceStatus(balance)}\n\n`;
+  msg += `Введите сумму:\n`;
+  msg += `• положительная (например, 5000) — платёж получен, долг уменьшится;\n`;
+  msg += `• отрицательная (например, -5000) — долг арендатора увеличится.\n\n`;
+  msg += `Для отмены нажмите «❌ Отмена».`;
+  await ctx.reply(msg, keyboards.cancelKeyboard());
 }
 
 // /set_initial_readings
@@ -581,38 +619,122 @@ async function setInitialReadings(ctx, user) {
   await ctx.reply(`✅ Начальные показания установлены:\nЭлектричество: ${elec}\nВода: ${water}\nГаз: ${gas}`);
 }
 
-// Handle payment input
+// Handle payment amount input → show confirmation
 async function handlePaymentInput(ctx, user) {
   const sess = session.getSession(user.user_id);
   const amount = parseNumber(ctx.message.text.trim());
-  if (amount === null || amount <= 0) {
-    session.clearSession(user.user_id);
-    return ctx.reply('Некорректная сумма. Попробуйте снова: /pay', keyboards.adminMainMenu());
+  if (amount === null || Math.round(amount * 100) === 0) {
+    return ctx.reply('Некорректная сумма. Введите число, отличное от нуля (например, 5000 или -5000), или нажмите «❌ Отмена».');
   }
   const flat = await queries.getFlat(sess.flatId);
   if (!flat || flat.admin_user_id !== user.user_id) {
     session.clearSession(user.user_id);
-    return ctx.reply('Квартира не найдена или не принадлежит вам. Попробуйте снова: /pay', keyboards.adminMainMenu());
+    return ctx.reply('Квартира не найдена или не принадлежит вам.', keyboards.adminMainMenu());
   }
-  const mk = monthKey();
-  await queries.createPayment(sess.flatId, mk, amount, user.user_id);
+  const rounded = round2(amount);
   const balance = await queries.getBalance(sess.flatId);
-  session.clearSession(user.user_id);
-  await ctx.reply(
-    `✅ Платёж ${formatMoneyShort(amount)} внесён.\nНовый баланс: ${formatMoney(balance)}`,
-    keyboards.adminMainMenu()
-  );
+  const after = round2(balance - rounded);
+  session.setSession(user.user_id, { ...sess, step: 'confirm', amount: rounded });
 
-  // Notify all active tenants of this flat
+  let msg = `Проверьте данные:\n\n🏠 ${flat.name}\n`;
+  if (rounded > 0) {
+    msg += `💵 Платёж: ${formatMoney(rounded)}\n`;
+  } else {
+    msg += `⚠️ Долг увеличится на ${formatMoney(-rounded)}\n`;
+  }
+  msg += `\nСейчас: ${balanceStatus(balance)}\nПосле: ${balanceStatus(after)}`;
+  await ctx.reply(msg, Markup.inlineKeyboard([
+    [Markup.button.callback('✅ Сохранить', 'pay_ok'), Markup.button.callback('❌ Отмена', 'pay_cancel')],
+  ]));
+}
+
+// Confirmation button pressed
+async function confirmPayment(ctx, user) {
+  const sess = session.getSession(user.user_id);
+  if (!sess || sess.flow !== 'payment' || sess.step !== 'confirm' || !sess.amount) {
+    await ctx.answerCbQuery('Операция устарела');
+    return ctx.editMessageReplyMarkup(undefined).catch(() => {});
+  }
+  const flat = await queries.getFlat(sess.flatId);
+  if (!flat || flat.admin_user_id !== user.user_id) {
+    session.clearSession(user.user_id);
+    return ctx.answerCbQuery('Квартира не найдена');
+  }
+  const amount = sess.amount;
+  session.clearSession(user.user_id);
+  await queries.createPayment(sess.flatId, monthKey(), amount, user.user_id);
+  const balance = await queries.getBalance(sess.flatId);
+  await ctx.answerCbQuery('Сохранено');
+  const what = amount > 0 ? `Платёж ${formatMoney(amount)} внесён` : `Долг увеличен на ${formatMoney(-amount)}`;
+  await ctx.editMessageText(`✅ ${what}.\n🏠 ${flat.name}\n${balanceStatus(balance)}`);
+  await ctx.reply('Главное меню', keyboards.adminMainMenu());
+
   const tenants = await queries.getTenantsForFlat(sess.flatId);
+  const tenantMsg = amount > 0
+    ? `💰 Внесён платёж на сумму ${formatMoney(amount)}.\n${balanceStatus(balance)}`
+    : `📌 Арендодатель увеличил долг на ${formatMoney(-amount)}.\n${balanceStatus(balance)}`;
+  for (const tenant of tenants) {
+    try { await ctx.telegram.sendMessage(tenant.user_id, tenantMsg); } catch (e) { /* blocked bot */ }
+  }
+}
+
+async function cancelPayment(ctx, user) {
+  session.clearSession(user.user_id);
+  await ctx.answerCbQuery('Отменено');
+  await ctx.editMessageText('❌ Платёж отменён.').catch(() => {});
+  await ctx.reply('Главное меню', keyboards.adminMainMenu());
+}
+
+// 🗑 pressed → ask confirmation
+async function askDeletePayment(ctx, user, txId) {
+  const t = await queries.getTransactionById(txId);
+  const flat = t ? await queries.getFlat(t.flat_id) : null;
+  if (!t || t.type !== 'payment' || !flat || flat.admin_user_id !== user.user_id) {
+    return ctx.answerCbQuery('Платёж не найден');
+  }
+  await ctx.answerCbQuery();
+  const d = parseDbDate(t.created_at);
+  const date = d && !isNaN(d) ? d.toLocaleDateString('ru-RU', { timeZone: config.TIMEZONE || 'Europe/Moscow' }) : '';
+  const effect = Number(t.amount) < 0
+    ? `Долг арендатора увеличится на ${formatMoney(-t.amount)}.`
+    : `Долг арендатора уменьшится на ${formatMoney(t.amount)}.`;
+  await ctx.editMessageText(
+    `Удалить запись?\n\n🏠 ${flat.name}\n${date} · ${txLabel(t)} · ${formatMoneyShort(Math.abs(t.amount))}\n\n${effect}`,
+    Markup.inlineKeyboard([[
+      Markup.button.callback('🗑 Да, удалить', `del_tx_ok_${t.id}`),
+      Markup.button.callback('↩️ Нет', 'hist_page_0'),
+    ]])
+  );
+}
+
+async function deletePaymentConfirmed(ctx, user, txId) {
+  const t = await queries.getTransactionById(txId);
+  const flat = t ? await queries.getFlat(t.flat_id) : null;
+  if (!t || t.type !== 'payment' || !flat || flat.admin_user_id !== user.user_id) {
+    return ctx.answerCbQuery('Платёж не найден');
+  }
+  const deleted = await queries.deletePayment(txId);
+  if (!deleted) return ctx.answerCbQuery('Платёж уже удалён');
+  await ctx.answerCbQuery('Удалено');
+  const balance = await queries.getBalance(flat.id);
+  const d = parseDbDate(deleted.created_at);
+  const date = d && !isNaN(d) ? d.toLocaleDateString('ru-RU', { timeZone: config.TIMEZONE || 'Europe/Moscow' }) : '';
+  const what = Number(deleted.amount) < 0
+    ? `платёж на сумму ${formatMoney(-deleted.amount)}`
+    : `корректировка долга на ${formatMoney(deleted.amount)}`;
+  const tenants = await queries.getTenantsForFlat(flat.id);
   for (const tenant of tenants) {
     try {
-      await ctx.telegram.sendMessage(
-        tenant.user_id,
-        `💰 Внесён платёж на сумму ${formatMoneyShort(amount)} руб.\nНовый баланс: ${formatMoney(balance)} руб.`
-      );
-    } catch (e) { /* tenant may have blocked bot or left chat */ }
+      await ctx.telegram.sendMessage(tenant.user_id, `🗑 Арендодатель удалил ${what} от ${date}.\n${balanceStatus(balance)}`);
+    } catch (e) { /* blocked bot */ }
   }
+  // Refresh history in place
+  const fresh = await queries.getUser(user.user_id);
+  if (fresh.selected_flat_id !== flat.id) {
+    return ctx.editMessageText(`✅ Удалено: ${what}.\n🏠 ${flat.name}\n${balanceStatus(balance)}`);
+  }
+  await ctx.reply(`✅ Удалено: ${what}.`);
+  return history(ctx, fresh, 0, true);
 }
 
 // Handle tariff change via menu buttons
@@ -655,7 +777,7 @@ async function handleTariffChange(ctx, user, tariffType) {
       prompt += `или одно число для единого тарифа:`;
       break;
   }
-  await ctx.reply(prompt, keyboards.removeKeyboard());
+  await ctx.reply(prompt, keyboards.cancelKeyboard());
 }
 
 // Handle tariff input (second step: date)
@@ -827,6 +949,10 @@ async function summary(ctx, user) {
 }
 
 module.exports = {
+  confirmPayment,
+  cancelPayment,
+  askDeletePayment,
+  deletePaymentConfirmed,
   adminStart,
   adminHelp,
   addFlat,
